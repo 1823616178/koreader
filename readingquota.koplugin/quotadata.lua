@@ -1,62 +1,65 @@
 --[[--
-Data layer for the Reading quota plugin.
+Data access and formatting for the AI credits dashboard.
 
-Today's reading time and page count come from the statistics plugin's SQLite
-database; the daily goal lives in our own settings file. Every DB access here
-degrades gracefully: if statistics was never enabled, or its schema drifted,
-we hand back demo values so the page still renders something meaningful.
+The endpoint is configurable because KOReader usually runs on another device
+than the dashboard server. A failed provider/window is kept as nil so one bad
+source never hides the other providers.
 
 @module koplugin.ReadingQuota.QuotaData
 --]]--
 
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
-local lfs = require("libs/libkoreader-lfs")
-local logger = require("logger")
+local http = require("socket.http")
+local ltn12 = require("ltn12")
+local rapidjson = require("rapidjson")
+local socketutil = require("socketutil")
 
-local DB_PATH = DataStorage:getSettingsDir() .. "/statistics.sqlite3"
 local SETTINGS_PATH = DataStorage:getSettingsDir() .. "/readingquota.lua"
-
-local DEFAULT_GOAL_MINUTES = 30
-local DEFAULT_GOAL_PAGES = 20
-
--- Same shape as statistics' own getTodayBookStats(), but against the raw
--- page_stat_data table so we don't depend on the page_stat view existing.
--- The inner GROUP BY collapses multiple visits to one page into one row, so
--- count(*) is "distinct pages touched today", not "page turns".
-local SQL_TODAY = [[
-    SELECT count(*),
-           sum(sum_duration)
-    FROM (
-        SELECT sum(duration) AS sum_duration
-        FROM   page_stat_data
-        WHERE  start_time >= %d
-        GROUP  BY id_book, page
-    );
-]]
+local DEFAULT_API_BASE = "http://192.168.1.25:8787"
 
 local QuotaData = {}
 
-local function startOfToday()
-    local now = os.date("*t")
-    return os.time() - (now.hour * 3600 + now.min * 60 + now.sec)
+local function trim(value)
+    return (value:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
---- Formats a duration as e.g. "1 小时 5 分钟".
-function QuotaData.formatDuration(seconds)
-    seconds = math.floor(seconds)
-    local hours = math.floor(seconds / 3600)
-    local minutes = math.floor(seconds % 3600 / 60)
-    if hours > 0 then
-        return string.format("%d 小时 %d 分钟", hours, minutes)
-    elseif minutes > 0 then
-        return string.format("%d 分钟", minutes)
-    else
-        return string.format("%d 秒", seconds)
+local function clamp(value)
+    return math.max(0, math.min(100, value))
+end
+
+local function validWindow(value)
+    if type(value) ~= "table" or type(value.used) ~= "number" then
+        return nil
     end
+    return {
+        used = clamp(value.used),
+        resetAt = type(value.resetAt) == "number" and value.resetAt or nil,
+    }
 end
 
--- Settings -------------------------------------------------------------------
+local function providerWindows(provider)
+    provider = type(provider) == "table" and provider or {}
+    return {
+        five = validWindow(provider.five),
+        seven = validWindow(provider.seven),
+    }
+end
+
+local function normalizeUrl(value)
+    value = trim(type(value) == "string" and value or "")
+    if value == "" then
+        value = DEFAULT_API_BASE
+    end
+    if not value:match("^https?://") then
+        value = "http://" .. value
+    end
+    value = value:gsub("/+$", "")
+    if not value:match("/api/usage$") then
+        value = value .. "/api/usage"
+    end
+    return value
+end
 
 function QuotaData:getSettings()
     if not self.settings then
@@ -65,101 +68,126 @@ function QuotaData:getSettings()
     return self.settings
 end
 
---- Returns { mode = "time"|"pages", minutes = n, pages = n }.
-function QuotaData:getGoal()
-    local settings = self:getSettings()
-    return {
-        mode = settings:readSetting("goal_mode", "time"),
-        minutes = settings:readSetting("goal_minutes", DEFAULT_GOAL_MINUTES),
-        pages = settings:readSetting("goal_pages", DEFAULT_GOAL_PAGES),
-    }
+function QuotaData:getApiUrl()
+    return normalizeUrl(self:getSettings():readSetting("usage_api_url", DEFAULT_API_BASE))
 end
 
-function QuotaData:setGoalMode(mode)
+function QuotaData:setApiUrl(value)
+    local url = normalizeUrl(value)
     local settings = self:getSettings()
-    settings:saveSetting("goal_mode", mode)
+    settings:saveSetting("usage_api_url", url)
     settings:flush()
+    return url
 end
 
-function QuotaData:setGoalValue(mode, value)
-    local settings = self:getSettings()
-    settings:saveSetting(mode == "pages" and "goal_pages" or "goal_minutes", value)
-    settings:flush()
-end
-
--- Statistics DB --------------------------------------------------------------
-
---- Returns { pages = n, duration = seconds } or nil plus a reason string.
-function QuotaData:queryToday()
-    if lfs.attributes(DB_PATH, "mode") ~= "file" then
-        return nil, "no_db"
-    end
-
-    local SQ3 = require("lua-ljsqlite3/init")
-    local conn
-    -- On failure the second return value is the error message, not a row.
-    local ok, pages_or_err, duration = pcall(function()
-        conn = SQ3.open(DB_PATH, "ro")
-        return conn:rowexec(string.format(SQL_TODAY, startOfToday()))
+--- Fetch and validate one aggregate usage snapshot.
+-- Returns normalized data, or nil plus a concise user-facing error.
+function QuotaData:fetch()
+    local sink = {}
+    socketutil:set_timeout(45, 50)
+    local ok, request_ok, code, _, status = pcall(function()
+        return http.request{
+            url = self:getApiUrl(),
+            method = "GET",
+            headers = {
+                ["Accept"] = "application/json",
+                ["Cache-Control"] = "no-cache",
+            },
+            sink = socketutil.table_sink(sink),
+        }
     end)
-    if conn then
-        pcall(function() conn:close() end)
-    end
+    socketutil:reset_timeout()
+
     if not ok then
-        logger.warn("ReadingQuota: statistics query failed:", pages_or_err)
-        return nil, "query_failed"
+        return nil, "请求失败：" .. tostring(request_ok)
+    end
+    if not request_ok or tonumber(code) ~= 200 then
+        return nil, "接口不可用：" .. tostring(status or code or "网络错误")
     end
 
+    local decode_ok, decoded, decode_err = pcall(rapidjson.decode, table.concat(sink))
+    if not decode_ok then
+        return nil, "响应不是有效 JSON：" .. tostring(decoded)
+    end
+    if type(decoded) ~= "table" then
+        return nil, "响应不是有效 JSON：" .. tostring(decode_err or "未知错误")
+    end
+
+    local agy = type(decoded.agy) == "table" and decoded.agy or {}
     return {
-        pages = tonumber(pages_or_err) or 0,
-        duration = tonumber(duration) or 0,
+        displayMode = decoded.displayMode == "remaining" and "remaining" or "used",
+        alertPercent = type(decoded.alertPercent) == "number" and clamp(decoded.alertPercent) or 85,
+        generatedAt = type(decoded.generatedAt) == "number" and decoded.generatedAt or nil,
+        claude = providerWindows(decoded.claude),
+        codex = providerWindows(decoded.codex),
+        kimi = providerWindows(decoded.kimi),
+        agy = {
+            gemini = providerWindows(agy.gemini),
+            thirdParty = providerWindows(agy.thirdParty),
+        },
     }
 end
 
---- Today's numbers, with a demo fallback. `source` is "db" when real.
-function QuotaData:getToday()
-    local stats, reason = self:queryToday()
-    if stats then
-        return { duration = stats.duration, pages = stats.pages, source = "db" }
-    end
-    -- Fallback so a fresh install still shows a page worth looking at.
-    return { duration = 19 * 60, pages = 24, source = reason }
-end
-
---- Everything the page needs, in one call.
-function QuotaData:getQuota()
-    local today = self:getToday()
-    local goal = self:getGoal()
-
-    local done, target
-    if goal.mode == "pages" then
-        done, target = today.pages, goal.pages
-    else
-        done, target = today.duration, goal.minutes * 60
-    end
-
-    local ratio = target > 0 and done / target or 1
-    if ratio > 1 then
-        ratio = 1
-    end
-
+function QuotaData.emptySnapshot()
+    local empty = { five = nil, seven = nil }
     return {
-        mode = goal.mode,
-        done = done,
-        target = target,
-        remaining = math.max(target - done, 0),
-        ratio = ratio,
-        today = today,
-        goal = goal,
+        displayMode = "used",
+        alertPercent = 85,
+        generatedAt = nil,
+        claude = empty,
+        codex = empty,
+        kimi = empty,
+        agy = {
+            gemini = { five = nil, seven = nil },
+            thirdParty = { five = nil, seven = nil },
+        },
     }
 end
 
---- Renders `done`/`target`/`remaining` in the unit the current mode uses.
-function QuotaData.formatAmount(mode, value)
-    if mode == "pages" then
-        return string.format("%d 页", value)
+function QuotaData.displayValue(window, mode)
+    if not window then
+        return nil
     end
-    return QuotaData.formatDuration(value)
+    if mode == "remaining" then
+        return clamp(100 - window.used)
+    end
+    return window.used
+end
+
+function QuotaData.formatPercent(value)
+    if type(value) ~= "number" then
+        return "--"
+    end
+    if math.abs(value - math.floor(value + 0.5)) < 0.05 then
+        return string.format("%d%%", math.floor(value + 0.5))
+    end
+    return string.format("%.1f%%", value)
+end
+
+function QuotaData.formatReset(reset_at)
+    if type(reset_at) ~= "number" then
+        return "重置时间未知"
+    end
+    local seconds = math.floor(reset_at / 1000 - os.time())
+    if seconds <= 0 then
+        return "即将重置"
+    elseif seconds < 3600 then
+        return string.format("%d 分钟后", math.max(1, math.ceil(seconds / 60)))
+    elseif seconds < 86400 then
+        local hours = math.floor(seconds / 3600)
+        local minutes = math.floor(seconds % 3600 / 60)
+        return string.format("%d 小时 %d 分后", hours, minutes)
+    elseif seconds < 7 * 86400 then
+        return string.format("%d 天 %d 小时后", math.floor(seconds / 86400), math.floor(seconds % 86400 / 3600))
+    end
+    return os.date("%m-%d %H:%M", math.floor(reset_at / 1000))
+end
+
+function QuotaData.formatTimestamp(timestamp)
+    if type(timestamp) ~= "number" then
+        return "--"
+    end
+    return os.date("%m-%d %H:%M:%S", math.floor(timestamp / 1000))
 end
 
 return QuotaData

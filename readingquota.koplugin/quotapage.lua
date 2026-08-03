@@ -1,8 +1,8 @@
 --[[--
-The full-screen "today's reading quota" page.
+Compact full-screen AI credits dashboard.
 
-Takes over the whole screen like KOReader's own book map / page browser do,
-so it reads as its own app screen rather than a popup over the reader.
+Five equal tiles fit on one page: Claude Code, Codex, Kimi Code, AGY Gemini,
+and AGY Claude/GPT. The sixth tile carries connection metadata and controls.
 
 @module koplugin.ReadingQuota.QuotaPage
 --]]--
@@ -16,12 +16,13 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
+local HorizontalSpan = require("ui/widget/horizontalspan")
 local InputContainer = require("ui/widget/container/inputcontainer")
+local InputDialog = require("ui/widget/inputdialog")
 local LeftContainer = require("ui/widget/container/leftcontainer")
 local LineWidget = require("ui/widget/linewidget")
 local RightContainer = require("ui/widget/container/rightcontainer")
 local Size = require("ui/size")
-local SpinWidget = require("ui/widget/spinwidget")
 local TextWidget = require("ui/widget/textwidget")
 local TitleBar = require("ui/widget/titlebar")
 local UIManager = require("ui/uimanager")
@@ -32,23 +33,32 @@ local QuotaData = require("quotadata")
 local Screen = Device.screen
 
 local QuotaPage = InputContainer:extend{
-    title = "今日阅读额度",
+    title = "AI 额度",
 }
 
 function QuotaPage:init()
     self.width = Screen:getWidth()
     self.height = Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.height }
-    self.covers_fullscreen = true -- hint for UIManager:_repaint()
+    self.covers_fullscreen = true
 
-    self.h_padding = Screen:scaleBySize(24)
+    self.h_padding = Screen:scaleBySize(16)
+    self.card_gap = Screen:scaleBySize(8)
+    self.card_padding = Screen:scaleBySize(9)
     self.content_width = self.width - 2 * self.h_padding
-    self.row_height = Screen:scaleBySize(36)
+    self.card_width = math.floor((self.content_width - self.card_gap) / 2)
+    self.card_inner_width = self.card_width - 2 * (self.card_padding + Size.border.thin)
+    self.line_height = Screen:scaleBySize(27)
 
-    self.face_big = Font:getFace("cfont", 30)
-    self.face_note = Font:getFace("cfont", 18)
-    self.face_label = Font:getFace("cfont", 17)
-    self.face_value = Font:getFace("cfont", 17)
+    self.face_card_title = Font:getFace("cfont", 19)
+    self.face_label = Font:getFace("cfont", 14)
+    self.face_percent = Font:getFace("cfont", 16)
+    self.face_detail = Font:getFace("cfont", 12)
+
+    self.snapshot = QuotaData.emptySnapshot()
+    self.loading = true
+    self.error_text = nil
+    self.request_started = false
 
     self:registerKeyEvents()
     if Device:isTouchDevice() then
@@ -57,7 +67,6 @@ function QuotaPage:init()
         }
     end
 
-    self.quota = QuotaData:getQuota()
     self[1] = self:buildLayout()
 end
 
@@ -67,131 +76,196 @@ function QuotaPage:registerKeyEvents()
     end
 end
 
--- Layout ---------------------------------------------------------------------
+local function textWidget(text, face, max_width)
+    return TextWidget:new{
+        text = text,
+        face = face,
+        max_width = max_width,
+    }
+end
 
---- A label on the left, its value flushed right, spanning the content width.
-function QuotaPage:buildRow(label, value)
-    local half = math.floor(self.content_width / 2)
+function QuotaPage:buildValueLine(label, value)
+    local label_width = math.floor(self.card_inner_width * 0.42)
+    local value_width = self.card_inner_width - label_width
     return HorizontalGroup:new{
         LeftContainer:new{
-            dimen = Geom:new{ w = half, h = self.row_height },
-            TextWidget:new{
-                text = label,
-                face = self.face_label,
-                max_width = half - Size.padding.default,
-            },
+            dimen = Geom:new{ w = label_width, h = self.line_height },
+            textWidget(label, self.face_label, label_width),
         },
         RightContainer:new{
-            dimen = Geom:new{ w = self.content_width - half, h = self.row_height },
-            TextWidget:new{
-                text = value,
-                face = self.face_value,
-                max_width = self.content_width - half - Size.padding.default,
-            },
+            dimen = Geom:new{ w = value_width, h = self.line_height },
+            textWidget(value, self.face_percent, value_width),
         },
     }
 end
 
-function QuotaPage:buildHeadline()
-    local quota = self.quota
-    if quota.ratio >= 1 then
-        return "今日目标已达成"
+function QuotaPage:buildWindow(label, window)
+    local mode = self.snapshot.displayMode
+    local value = QuotaData.displayValue(window, mode)
+    local value_text = value and QuotaData.formatPercent(value) or "--"
+    local detail = window and QuotaData.formatReset(window.resetAt) or "暂无数据"
+    if window and window.used >= self.snapshot.alertPercent then
+        value_text = value_text .. " !"
     end
-    return "还剩 " .. QuotaData.formatAmount(quota.mode, quota.remaining)
-end
-
-function QuotaPage:buildSourceText()
-    local source = self.quota.today.source
-    if source == "db" then
-        return "统计插件"
-    elseif source == "no_db" then
-        return "示例数据（统计插件未启用）"
-    else
-        return "示例数据（数据库读取失败）"
-    end
-end
-
-function QuotaPage:buildContent()
-    local quota = self.quota
-    local span = VerticalSpan:new{ width = Screen:scaleBySize(12) }
-    local big_span = VerticalSpan:new{ width = Screen:scaleBySize(24) }
-
-    self.bar = QuotaBar:new{
-        width = self.content_width,
-        percentage = quota.ratio,
-    }
 
     return VerticalGroup:new{
-        align = "center",
-        TextWidget:new{
-            text = self:buildHeadline(),
-            face = self.face_big,
-            max_width = self.content_width,
+        align = "left",
+        self:buildValueLine(label, value_text),
+        QuotaBar:new{
+            width = self.card_inner_width,
+            height = Screen:scaleBySize(8),
+            segments = 12,
+            gap = Screen:scaleBySize(2),
+            percentage = value and value / 100 or 0,
+            emptycolor = window and Blitbuffer.COLOR_LIGHT_GRAY or Blitbuffer.COLOR_GRAY,
         },
-        big_span,
-        self.bar,
-        span,
-        HorizontalGroup:new{
-            LeftContainer:new{
-                dimen = Geom:new{ w = math.floor(self.content_width / 2), h = self.row_height },
-                TextWidget:new{
-                    text = "已读 " .. QuotaData.formatAmount(quota.mode, quota.done),
-                    face = self.face_note,
+        VerticalSpan:new{ width = Screen:scaleBySize(3) },
+        RightContainer:new{
+            dimen = Geom:new{ w = self.card_inner_width, h = self.line_height },
+            textWidget(detail, self.face_detail, self.card_inner_width),
+        },
+    }
+end
+
+function QuotaPage:buildCard(title, windows)
+    local mode_label = self.snapshot.displayMode == "remaining" and "剩余" or "已用"
+    return FrameContainer:new{
+        width = self.card_width,
+        bordersize = Size.border.thin,
+        padding = self.card_padding,
+        margin = 0,
+        background = Blitbuffer.COLOR_WHITE,
+        VerticalGroup:new{
+            align = "left",
+            HorizontalGroup:new{
+                LeftContainer:new{
+                    dimen = Geom:new{ w = math.floor(self.card_inner_width * 0.72), h = self.line_height },
+                    textWidget(title, self.face_card_title, math.floor(self.card_inner_width * 0.72)),
+                },
+                RightContainer:new{
+                    dimen = Geom:new{ w = math.ceil(self.card_inner_width * 0.28), h = self.line_height },
+                    textWidget(mode_label, self.face_detail, math.ceil(self.card_inner_width * 0.28)),
                 },
             },
-            RightContainer:new{
-                dimen = Geom:new{ w = math.ceil(self.content_width / 2), h = self.row_height },
-                TextWidget:new{
-                    text = "目标 " .. QuotaData.formatAmount(quota.mode, quota.target),
-                    face = self.face_note,
-                },
-            },
+            VerticalSpan:new{ width = Screen:scaleBySize(5) },
+            self:buildWindow("5 小时", windows.five),
+            VerticalSpan:new{ width = Screen:scaleBySize(5) },
+            self:buildWindow("周额度", windows.seven),
         },
-        big_span,
+    }
+end
+
+function QuotaPage:buildInfoBlock(label, value, detail)
+    return VerticalGroup:new{
+        align = "left",
+        self:buildValueLine(label, value),
         LineWidget:new{
-            dimen = Geom:new{ w = self.content_width, h = Size.line.medium },
-            background = Blitbuffer.COLOR_GRAY,
+            dimen = Geom:new{ w = self.card_inner_width, h = Screen:scaleBySize(8) },
+            background = Blitbuffer.COLOR_LIGHT_GRAY,
         },
-        span,
-        self:buildRow("今日阅读时长", QuotaData.formatDuration(quota.today.duration)),
-        self:buildRow("今日阅读页数", string.format("%d 页", quota.today.pages)),
-        self:buildRow("完成度", string.format("%d%%", math.floor(quota.ratio * 100 + 0.5))),
-        self:buildRow("数据来源", self:buildSourceText()),
-        big_span,
-        self:buildButtons(),
+        VerticalSpan:new{ width = Screen:scaleBySize(3) },
+        LeftContainer:new{
+            dimen = Geom:new{ w = self.card_inner_width, h = self.line_height },
+            textWidget(detail, self.face_detail, self.card_inner_width),
+        },
+    }
+end
+
+function QuotaPage:buildInfoCard()
+    local state, detail
+    if self.loading then
+        state, detail = "连接中", QuotaData:getApiUrl()
+    elseif self.error_text then
+        state, detail = "失败", self.error_text
+    else
+        state, detail = "已连接", QuotaData:getApiUrl()
+    end
+    local mode = self.snapshot.displayMode == "remaining" and "剩余" or "已用"
+    local generated = "快照 " .. QuotaData.formatTimestamp(self.snapshot.generatedAt)
+
+    return FrameContainer:new{
+        width = self.card_width,
+        bordersize = Size.border.thin,
+        padding = self.card_padding,
+        margin = 0,
+        background = Blitbuffer.COLOR_WHITE,
+        VerticalGroup:new{
+            align = "left",
+            LeftContainer:new{
+                dimen = Geom:new{ w = self.card_inner_width, h = self.line_height },
+                textWidget("数据接口", self.face_card_title, self.card_inner_width),
+            },
+            VerticalSpan:new{ width = Screen:scaleBySize(5) },
+            self:buildInfoBlock("状态", state, detail),
+            VerticalSpan:new{ width = Screen:scaleBySize(5) },
+            self:buildInfoBlock("显示", mode, generated .. " · 告警 " .. QuotaData.formatPercent(self.snapshot.alertPercent)),
+        },
+    }
+end
+
+function QuotaPage:buildCardRow(left, right)
+    local row_height = math.max(left:getSize().h, right:getSize().h)
+    return HorizontalGroup:new{
+        CenterContainer:new{
+            dimen = Geom:new{ w = self.card_width, h = row_height },
+            left,
+        },
+        HorizontalSpan:new{ width = self.card_gap },
+        CenterContainer:new{
+            dimen = Geom:new{ w = self.card_width, h = row_height },
+            right,
+        },
     }
 end
 
 function QuotaPage:buildButtons()
-    local mode_text = self.quota.mode == "pages" and "按页数计" or "按时长计"
     return ButtonTable:new{
         width = self.content_width,
         show_parent = self,
         buttons = {
             {
-                { text = mode_text, callback = function() self:toggleMode() end },
-                { text = "设定目标", callback = function() self:editGoal() end },
-            },
-            {
-                { text = "刷新", callback = function() self:refresh() end },
+                { text = self.loading and "加载中…" or "刷新", enabled = not self.loading,
+                    callback = function() self:refresh() end },
+                { text = "接口地址", callback = function() self:editApiUrl() end },
                 { text = "关闭", callback = function() self:onClose() end },
             },
         },
     }
 end
 
+function QuotaPage:buildContent()
+    local claude = self:buildCard("Claude Code", self.snapshot.claude)
+    local codex = self:buildCard("Codex", self.snapshot.codex)
+    local kimi = self:buildCard("Kimi Code", self.snapshot.kimi)
+    local gemini = self:buildCard("AGY · Gemini", self.snapshot.agy.gemini)
+    local third_party = self:buildCard("AGY · Claude/GPT", self.snapshot.agy.thirdParty)
+    local info = self:buildInfoCard()
+    local gap = VerticalSpan:new{ width = self.card_gap }
+
+    return VerticalGroup:new{
+        align = "center",
+        self:buildCardRow(claude, codex),
+        gap,
+        self:buildCardRow(kimi, gemini),
+        gap,
+        self:buildCardRow(third_party, info),
+        gap,
+        self:buildButtons(),
+    }
+end
+
 function QuotaPage:buildLayout()
+    local host = QuotaData:getApiUrl():match("^https?://([^/]+)") or "未配置"
     self.title_bar = TitleBar:new{
         width = self.width,
         fullscreen = true,
         align = "center",
         title = self.title,
-        subtitle = os.date("%Y-%m-%d"),
+        subtitle = host,
         with_bottom_line = true,
         close_callback = function() self:onClose() end,
         show_parent = self,
     }
-
     local body_height = self.height - self.title_bar:getSize().h
 
     return FrameContainer:new{
@@ -212,39 +286,71 @@ function QuotaPage:buildLayout()
     }
 end
 
--- Actions --------------------------------------------------------------------
+-- Fetch after the loading skeleton has had one paint cycle.
+function QuotaPage:onShow()
+    UIManager:setDirty(self, "ui")
+    if not self.request_started then
+        self.request_started = true
+        UIManager:scheduleIn(0.1, function() self:performFetch() end)
+    end
+end
 
---- Re-reads the data and rebuilds the layout in place.
-function QuotaPage:refresh()
-    self.quota = QuotaData:getQuota()
+function QuotaPage:rebuild()
     self[1]:free()
     self[1] = self:buildLayout()
     UIManager:setDirty(self, "ui")
 end
 
-function QuotaPage:toggleMode()
-    QuotaData:setGoalMode(self.quota.mode == "pages" and "time" or "pages")
-    self:refresh()
+function QuotaPage:performFetch()
+    local snapshot, err = QuotaData:fetch()
+    if snapshot then
+        self.snapshot = snapshot
+        self.error_text = nil
+    else
+        self.error_text = err
+    end
+    self.loading = false
+    self:rebuild()
 end
 
-function QuotaPage:editGoal()
-    local goal = self.quota.goal
-    local is_pages = goal.mode == "pages"
-    UIManager:show(SpinWidget:new{
-        title_text = is_pages and "每日目标页数" or "每日目标时长",
-        value = is_pages and goal.pages or goal.minutes,
-        value_min = 1,
-        value_max = is_pages and 500 or 600,
-        value_step = 5,
-        value_hold_step = is_pages and 25 or 30,
-        unit = is_pages and "页" or "分钟",
-        ok_text = "保存",
-        cancel_text = "取消",
-        callback = function(spin)
-            QuotaData:setGoalValue(goal.mode, spin.value)
-            self:refresh()
-        end,
-    })
+function QuotaPage:refresh()
+    if self.loading then
+        return
+    end
+    self.loading = true
+    self.error_text = nil
+    self:rebuild()
+    UIManager:scheduleIn(0.1, function() self:performFetch() end)
+end
+
+function QuotaPage:editApiUrl()
+    local dialog
+    dialog = InputDialog:new{
+        title = "Usage API 地址",
+        description = "可输入主机地址或完整的 /api/usage 地址",
+        input = QuotaData:getApiUrl(),
+        input_hint = "http://192.168.1.25:8787",
+        buttons = {
+            {
+                {
+                    text = "取消",
+                    id = "close",
+                    callback = function() UIManager:close(dialog) end,
+                },
+                {
+                    text = "保存并刷新",
+                    is_enter_default = true,
+                    callback = function()
+                        QuotaData:setApiUrl(dialog:getInputText())
+                        UIManager:close(dialog)
+                        self:refresh()
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 function QuotaPage:onClose()
@@ -252,13 +358,12 @@ function QuotaPage:onClose()
     return true
 end
 
+
 function QuotaPage:onMultiSwipe()
-    self:onClose()
-    return true
+    return self:onClose()
 end
 
 function QuotaPage:onCloseWidget()
-    -- A full-screen page leaves ghosting behind on e-ink, so flush it on the way out.
     UIManager:setDirty(nil, "full")
 end
 

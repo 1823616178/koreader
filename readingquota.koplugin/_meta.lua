@@ -1,5 +1,5 @@
 local _ = require("gettext")
 return {
-    fullname = _("Reading quota"),
-    description = _([[Shows a full-screen, Codex-style bar of how much of today's reading goal is left.]]),
+    fullname = _("AI credits"),
+    description = _([[Shows Claude Code, Codex, Kimi Code and Antigravity credit usage on one compact page.]]),
 }

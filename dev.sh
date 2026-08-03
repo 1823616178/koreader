@@ -51,7 +51,7 @@ log)
     tail -n 60 "$ROOT_DIR/koreader.log"
     ;;
 *)
-    echo "usage: $0 {check|link|run|log}" >&2
+    echo "usage: $0 {check|link|smoke|run|log}" >&2
     exit 2
     ;;
 esac
