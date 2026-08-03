@@ -11,7 +11,7 @@ Five provider tiles and one connection-status tile fit in a two-column, three-ro
 The default endpoint is:
 
 ```text
-http://192.168.1.25:8787/api/usage
+http://123.161.179.32:46927/api/usage
 ```
 
 Use **API address** on the page to change it. Both a server base URL and a complete `/api/usage` URL are accepted. The setting is persisted in KOReader's `settings/readingquota.lua`.

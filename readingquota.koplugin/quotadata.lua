@@ -16,7 +16,7 @@ local rapidjson = require("rapidjson")
 local socketutil = require("socketutil")
 
 local SETTINGS_PATH = DataStorage:getSettingsDir() .. "/readingquota.lua"
-local DEFAULT_API_BASE = "http://192.168.1.25:8787"
+local DEFAULT_API_BASE = "http://123.161.179.32:46927"
 
 local QuotaData = {}
 

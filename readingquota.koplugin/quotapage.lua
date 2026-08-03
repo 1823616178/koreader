@@ -329,7 +329,7 @@ function QuotaPage:editApiUrl()
         title = "Usage API 地址",
         description = "可输入主机地址或完整的 /api/usage 地址",
         input = QuotaData:getApiUrl(),
-        input_hint = "http://192.168.1.25:8787",
+        input_hint = "http://123.161.179.32:46927",
         buttons = {
             {
                 {
