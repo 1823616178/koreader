@@ -46,18 +46,41 @@ static int wifi_probe(void)
     return result;
 }
 
+/* Set when WE ran wirelessEnable 1 (including the give-up-timeout case: the
+ * radio is on either way, so the release still owes a disable). Cleared by
+ * net_release_wifi() or whenever a probe shows the connection predates us. */
+static int g_wifi_we_enabled;
+
+void net_release_wifi(void)
+{
+    int rc;
+
+    if (!g_wifi_we_enabled)
+        return; /* nothing raised by us: a pre-existing connection stays up */
+    g_wifi_we_enabled = 0; /* clear first: release stays idempotent even if lipc fails */
+    wd_expect(NET_CMD_S);
+    rc = system("lipc-set-prop -i com.lab126.cmd wirelessEnable 0 2>/dev/null");
+    (void)rc;
+}
+
 int net_ensure_wifi(void)
 {
     long waited = 0;
     int empty_streak = 0;
     int state = wifi_probe(); /* arms the watchdog itself */
 
-    if (state == 1)
+    if (state == 1) {
+        g_wifi_we_enabled = 0; /* was already up before we got here: not ours */
         return 0;
+    }
     if (state < 0)
         empty_streak = 1;
 
-    /* Ask the connection manager to enable WiFi (instant no-op off-device). */
+    /* Ask the connection manager to enable WiFi (instant no-op off-device).
+     * Known edge: a connection that was mid-setup at the first probe gets
+     * attributed to us and dropped after the fetch; rare, and wifid just
+     * brings it back up. */
+    g_wifi_we_enabled = 1;
     {
         int rc;
 

@@ -13,12 +13,26 @@
 #define CONFIG_IDLE_TIMEOUT_MIN 60
 #define CONFIG_IDLE_TIMEOUT_MAX 3600
 
+/* Release the radio after each fetch when we were the ones who raised it.
+ * The Kindle's WiFi chip idles at tens of milliamps, so on-by-default is the
+ * power-correct choice; 0 keeps the radio up (user's explicit preference). */
+#define CONFIG_WIFI_AUTO_OFF_DEFAULT 1
+
+/* Periodic re-fetch in whole minutes while the dashboard is up. 0 disables:
+ * the default keeps "open -> glance -> put down" free of surprise refreshes.
+ * An auto-refresh never feeds the idle timer, so the app still closes itself
+ * after idle_timeout_s no matter how long it has been refreshing. */
+#define CONFIG_AUTO_REFRESH_DEFAULT 0
+#define CONFIG_AUTO_REFRESH_MAX 60
+
 typedef struct {
     char api_url[512];   /* normalized, always ends with /api/usage */
     int touch_swap_xy;   /* 0 or 1: swap touch X/Y axes */
     int touch_mirror_x;  /* 0 or 1: x = width  - 1 - x */
     int touch_mirror_y;  /* 0 or 1: y = height - 1 - y */
     int idle_timeout_s;  /* seconds without a tap before the app exits itself */
+    int wifi_auto_off;   /* 0/1: drop the WiFi we raised once a fetch is done */
+    int auto_refresh_min;/* minutes between automatic re-fetches; 0 = off */
 } AppConfig;
 
 void config_defaults(AppConfig *cfg);
@@ -30,5 +44,7 @@ int  config_save(const AppConfig *cfg, const char *path);
 void config_normalize_url(char *dst, size_t dst_size, const char *src);
 /* Clamp into [CONFIG_IDLE_TIMEOUT_MIN, CONFIG_IDLE_TIMEOUT_MAX]; <= 0 -> default. */
 int  config_clamp_idle_timeout(int secs);
+/* Clamp into [1, CONFIG_AUTO_REFRESH_MAX]; <= 0 -> 0 (off). */
+int  config_clamp_auto_refresh(int mins);
 
 #endif

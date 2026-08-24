@@ -1,19 +1,21 @@
 /* aiquota -- AI quota dashboard for Kindle: entry point, state machine and
  * debug switches. Mirrors the KOReader plugin's flow (readingquota.koplugin/
  * quotapage.lua): paint the loading skeleton first, fetch only after the
- * first paint, then serve taps on the refresh / edit-url / close buttons.
+ * first paint, then serve taps on the refresh / settings / close buttons.
  *
- * State machine: LOADING -> READY | ERROR, plus a KEYPAD sub-mode entered
- * from READY/ERROR. Modes: no args = normal run; --demo renders embedded
- * demo data without touching the network; --dump-state prints FBInkState;
- * --calibrate derives the touch transform over SSH. A clean exit returns 0
- * and the wrapper script (extension/bin/aiquota.sh) restores the framework. */
+ * State machine: LOADING -> READY | ERROR, plus a SETTINGS sub-mode entered
+ * from READY/ERROR (which itself opens KEYPAD editors for its fields).
+ * Modes: no args = normal run; --demo renders embedded demo data without
+ * touching the network; --dump-state prints FBInkState; --calibrate derives
+ * the touch transform over SSH. A clean exit returns 0 and the wrapper script
+ * (extension/bin/aiquota.sh) restores the framework. */
 #define _POSIX_C_SOURCE 200809L /* sigaction */
 
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -23,6 +25,7 @@
 #include "keypad.h"
 #include "net.h"
 #include "quota.h"
+#include "settings.h"
 #include "ui.h"
 #include "watchdog.h"
 
@@ -148,14 +151,14 @@ static void install_signal_handlers(void)
  * work bound. With this, the app has no unbounded wait left anywhere, which
  * is what lets watchdog.sh read a missing beat as "wedged" rather than "the
  * user put the Kindle down".
- * Returns 0 tap / 1 idle timeout / -1 device error, like input_wait_tap. */
-static int wait_tap(int fd, int scr_w, int scr_h, const AppConfig *cfg,
-                    int *x, int *y)
+ * Returns 0 tap / 1 timeout / -1 device error, like input_wait_tap. */
+static int wait_tap_for(int fd, int scr_w, int scr_h, const AppConfig *cfg,
+                        int timeout_s, int *x, int *y)
 {
     int rc;
 
-    wd_expect(cfg->idle_timeout_s + WD_SLACK_S);
-    rc = input_wait_tap(fd, scr_w, scr_h, cfg, cfg->idle_timeout_s, x, y);
+    wd_expect(timeout_s + WD_SLACK_S);
+    rc = input_wait_tap(fd, scr_w, scr_h, cfg, timeout_s, x, y);
     wd_expect(WD_STEP_S);
     return rc;
 }
@@ -218,10 +221,11 @@ static void paint_loading(int fbfd, Ui *ui, const char *host, const char *api_ur
 /* One fetch+paint cycle: WiFi check, HTTP GET, JSON parse, dashboard redraw.
  * A successful parse replaces *snap; on error the last good snapshot is kept
  * (or an empty one when nothing ever succeeded), and detail carries the URL
- * or the error text. Returns ST_READY or ST_ERROR. */
+ * or the error text. release_wifi: hand the radio back after the attempt
+ * (only effective when net.c actually raised it). Returns ST_READY/ST_ERROR. */
 static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
                     QuotaSnapshot *snap, int *have_good, int demo,
-                    char *detail, size_t detail_size)
+                    char *detail, size_t detail_size, int release_wifi)
 {
     QuotaSnapshot fresh;
     int st = ST_READY;
@@ -262,6 +266,12 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
             }
             free(body); /* free(NULL) is fine */
         }
+
+        /* The fetch is over either way: if we raised the radio for it, drop
+         * it again. The dashboard keeps showing data with the WiFi off --
+         * e-ink holds the image, nothing else needs the network. */
+        if (release_wifi)
+            net_release_wifi();
     }
 
     if (st == ST_ERROR && !*have_good)
@@ -419,7 +429,8 @@ static int run_calibrate(int fbfd, int scr_w, int scr_h, int input_fd)
     fflush(stdout); /* the next read blocks; make sure prompts are out */
 
     for (i = 0; i < 4; i++) {
-        int wr = wait_tap(input_fd, scr_w, scr_h, &ccfg, &px[i], &py[i]);
+        int wr = wait_tap_for(input_fd, scr_w, scr_h, &ccfg,
+                              ccfg.idle_timeout_s, &px[i], &py[i]);
 
         if (wr != 0) {
             fprintf(stderr, "aiquota: %s\n",
@@ -471,6 +482,7 @@ int main(int argc, char **argv)
     Ui *ui = NULL;
     const char *host;
     char detail[DETAIL_SIZE];
+    time_t last_fetch;      /* when the current dashboard data was fetched */
     int have_good = 0;
     int have_cfg_file;
     int mode = MODE_NORMAL;
@@ -562,6 +574,7 @@ int main(int argc, char **argv)
     host = api_host(cfg.api_url);
     quota_empty_snapshot(&snap);
     detail[0] = '\0';
+    last_fetch = time(NULL);
 
     if (mode == MODE_DEMO) {
         /* Render the embedded sample, once, even without a touch device. */
@@ -585,22 +598,46 @@ int main(int argc, char **argv)
     for (;;) {
         int x = 0, y = 0;
         int wr;
+        int wait_s;
         UiAction action;
 
         if (st == ST_LOADING) {
             wd_expect(WD_STEP_S); /* net.c and http.c re-arm per blocking phase */
             paint_loading(fbfd, ui, host, cfg.api_url);
             st = do_fetch(fbfd, ui, cfg.api_url, host, &snap, &have_good,
-                          mode == MODE_DEMO, detail, sizeof(detail));
-            wd_expect(WD_STEP_S);
+                          mode == MODE_DEMO, detail, sizeof(detail),
+                          cfg.wifi_auto_off);
+            last_fetch = time(NULL); /* auto-refresh counts from this data */
         }
 
-        /* READY/ERROR: wait for a tap on the button row. Note: taps made while
-         * a blocking fetch runs stay queued in the kernel evdev buffer and are
-         * hit-tested here against the NEW screen -- harmless (one extra fetch). */
-        wr = wait_tap(input_fd, scr_w, scr_h, &cfg, &x, &y);
-        if (wr > 0)
+        /* READY/ERROR: wait for a tap on the button row. The poll bound is
+         * whichever comes first -- the idle deadline or the next auto-refresh.
+         * Taps made while a blocking fetch runs stay queued in the kernel
+         * evdev buffer and are hit-tested here against the NEW screen. */
+        wait_s = cfg.idle_timeout_s;
+        if (cfg.auto_refresh_min > 0) {
+            long until = last_fetch + (long)cfg.auto_refresh_min * 60 -
+                         (long)time(NULL);
+
+            if (until <= 0) {
+                st = ST_LOADING;
+                continue;
+            }
+            if (until < wait_s)
+                wait_s = (int)until;
+        }
+
+        wr = wait_tap_for(input_fd, scr_w, scr_h, &cfg, wait_s, &x, &y);
+        if (wr > 0) {
+            /* Timeout. The clock decides which deadline fired: an overdue
+             * auto-refresh loops back into a fetch; anything else is real
+             * idleness. An auto-refresh never feeds the idle timer, so a
+             * Kindle put face-up still closes the app on schedule. */
+            if (cfg.auto_refresh_min > 0 &&
+                time(NULL) >= last_fetch + (long)cfg.auto_refresh_min * 60)
+                continue;
             break; /* idle: close ourselves so the framework comes back */
+        }
         if (wr < 0) {
             fprintf(stderr, "aiquota: touch input device lost\n");
             rc = 1;
@@ -617,41 +654,115 @@ int main(int argc, char **argv)
             st = ST_LOADING;
             continue;
         }
-        if (action == UI_ACTION_EDIT_URL) {
-            char edit[sizeof(cfg.api_url)];
-            int kr = 0;
+        if (action == UI_ACTION_SETTINGS) {
+            Settings *sp = settings_create(ui, &cfg);
+            SettingsHit hit;
+            int done = 0;
+            int changed, url_changed = 0;
 
-            if (!kp)
-                kp = keypad_create(ui);
-            if (!kp) {
+            if (!sp) {
                 /* OOM: keep the dashboard up, just skip editing. */
-                fprintf(stderr, "aiquota: keypad_create failed\n");
+                fprintf(stderr, "aiquota: settings_create failed\n");
                 continue;
             }
-
-            snprintf(edit, sizeof(edit), "%s", cfg.api_url);
-            keypad_draw(kp, "接口地址", edit);
+            settings_draw(sp);
             full_refresh(fbfd);
-            while (kr == 0) { /* KEYPAD sub-mode */
-                wr = wait_tap(input_fd, scr_w, scr_h, &cfg, &x, &y);
-                if (wr > 0)
-                    goto out; /* idle: drop the edit, release the framework */
+
+            while (!done) {
+                wr = wait_tap_for(input_fd, scr_w, scr_h, &cfg,
+                                  cfg.idle_timeout_s, &x, &y);
+                if (wr > 0) {
+                    settings_destroy(sp);
+                    goto out; /* idle: drop edits, release the framework */
+                }
                 if (wr < 0) {
                     fprintf(stderr, "aiquota: touch input device lost\n");
+                    settings_destroy(sp);
                     rc = 1;
                     goto out;
                 }
-                kr = keypad_handle_tap(kp, fbfd, x, y, edit, sizeof(edit));
+                hit = settings_handle_tap(sp, fbfd, x, y);
+                if (hit == SET_HIT_BACK) {
+                    done = 1;
+                    continue;
+                }
+                if (hit == SET_HIT_NONE)
+                    continue; /* toggle flipped / stray tap: page already updated */
+
+                /* --- keypad editor over one field ------------------------ */
+                {
+                    char edit[sizeof(cfg.api_url)];
+                    int kr = 0;
+
+                    if (!kp)
+                        kp = keypad_create(ui);
+                    if (!kp) {
+                        /* OOM: keep the settings page up, skip the editor. */
+                        fprintf(stderr, "aiquota: keypad_create failed\n");
+                        continue;
+                    }
+
+                    if (hit == SET_HIT_EDIT_URL) {
+                        snprintf(edit, sizeof(edit), "%s", settings_url(sp));
+                        keypad_draw(kp, "接口地址", edit);
+                    } else if (hit == SET_HIT_EDIT_REFRESH) {
+                        snprintf(edit, sizeof(edit), "%d",
+                                 settings_refresh_min(sp));
+                        keypad_draw(kp, "自动刷新(分钟)", edit);
+                    } else {
+                        snprintf(edit, sizeof(edit), "%d",
+                                 settings_idle_s(sp));
+                        keypad_draw(kp, "自动退出(秒)", edit);
+                    }
+                    full_refresh(fbfd);
+
+                    while (kr == 0) {
+                        wr = wait_tap_for(input_fd, scr_w, scr_h, &cfg,
+                                          cfg.idle_timeout_s, &x, &y);
+                        if (wr > 0) {
+                            settings_destroy(sp);
+                            goto out; /* idle: drop edits, release framework */
+                        }
+                        if (wr < 0) {
+                            fprintf(stderr,
+                                    "aiquota: touch input device lost\n");
+                            settings_destroy(sp);
+                            rc = 1;
+                            goto out;
+                        }
+                        kr = keypad_handle_tap(kp, fbfd, x, y, edit,
+                                               sizeof(edit));
+                    }
+
+                    if (kr == 1) { /* confirm: validate into the working copy */
+                        if (hit == SET_HIT_EDIT_URL) {
+                            char norm[sizeof(cfg.api_url)];
+
+                            config_normalize_url(norm, sizeof(norm), edit);
+                            url_changed |= settings_set_url(sp, norm);
+                        } else if (hit == SET_HIT_EDIT_REFRESH) {
+                            settings_set_refresh_min(sp, atoi(edit));
+                        } else {
+                            settings_set_idle_s(sp, atoi(edit));
+                        }
+                    }
+                    /* Confirm and cancel both land back on the page, redrawn
+                     * from the working copy. */
+                    settings_draw(sp);
+                    full_refresh(fbfd);
+                }
             }
-            if (kr == 1) {
-                /* Confirm: normalize, persist, refetch the new endpoint. */
-                config_normalize_url(cfg.api_url, sizeof(cfg.api_url), edit);
-                if (config_save(&cfg, CONFIG_PATH) != 0)
-                    fprintf(stderr, "aiquota: cannot write %s\n", CONFIG_PATH);
+
+            changed = settings_commit(sp, &cfg);
+            settings_destroy(sp);
+            if (url_changed)
                 host = api_host(cfg.api_url);
+            if (changed && config_save(&cfg, CONFIG_PATH) != 0)
+                fprintf(stderr, "aiquota: cannot write %s\n", CONFIG_PATH);
+            if (url_changed) {
+                /* New endpoint: keep the confirm-address-refetches semantic. */
                 st = ST_LOADING;
             } else {
-                /* Cancel: redraw the dashboard as it was, nothing saved. */
                 ui_draw_dashboard(ui, &snap, host,
                                   st == ST_ERROR ? "失败" : "已连接",
                                   detail, 0);

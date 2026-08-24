@@ -6,7 +6,7 @@
 
 typedef struct Ui Ui;   /* fb geometry, scale factor, computed layout, button rects */
 
-typedef enum { UI_ACTION_NONE = 0, UI_ACTION_REFRESH, UI_ACTION_EDIT_URL, UI_ACTION_CLOSE } UiAction;
+typedef enum { UI_ACTION_NONE = 0, UI_ACTION_REFRESH, UI_ACTION_SETTINGS, UI_ACTION_CLOSE } UiAction;
 
 /* dpi comes from fbink_get_state(); font_path is the bundled Noto Sans SC subset (loaded via fbink_add_ot_font).
  * Returns NULL on failure (bad font_path/OOM); caller must check. */
@@ -52,7 +52,7 @@ struct Ui {
     int content_w, card_w, card_inner, card_h, content_h, body_y;
     /* font sizes in pixels */
     int px_card_title, px_label, px_percent, px_detail, px_title, px_subtitle;
-    /* bottom button row: refresh / edit-url / close, valid once drawn */
+    /* bottom button row: refresh / settings / close, valid once drawn */
     FBInkRect btn_rect[3];
     char btn_label[3][24];
     int btn_fg[3];      /* FG_COLOR_INDEX_E values */

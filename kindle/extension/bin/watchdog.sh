@@ -29,10 +29,12 @@ printf '%s\n' -1000 > /proc/self/oom_score_adj 2>/dev/null ||
 wrapper=$1
 ping=/var/tmp/aiquota.ping
 
-# The app beats every 15 s and every blocking phase it enters is bounded by a
-# deadline of its own, so 60 s of silence is already four missed beats.
-STALE_S=60
-POLL_S=5
+# The app beats every 30 s and every blocking phase it enters is bounded by a
+# deadline of its own, so 120 s of silence is already four missed beats. The
+# 15 s poll keeps fork churn low (date/stat per cycle) while still confirming
+# a wedge twice before acting.
+STALE_S=120
+POLL_S=15
 MAX_KILLS=2 # then escalate: SIGKILL is not going to work on this process
 
 stale=0  # consecutive stale-heartbeat observations

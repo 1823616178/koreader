@@ -66,7 +66,7 @@ stale_ping
 sleep 60 & wrapperA=$!
 echo $wrapperA > "$T/wrapper.pid"
 sh "$WD" $wrapperA & wdA=$!
-sleep 16
+sleep 35 # two consecutive stale polls need ~2*POLL_S
 ok 1 "$(cnt 'killall -9 aiquota')" "A: wedged app killed exactly once"
 ok 0 "$(alive $wrapperA)" "A: the kill brought the wrapper down with it"
 ok 0 "$(cnt 'killall -CONT')" "A: watchdog leaves the restore to the wrapper trap"
@@ -81,7 +81,7 @@ sleep 60 & wrapperB=$!
 sh "$WD" $wrapperB & wdB=$!
 sleep 2
 kill -9 $wrapperB; wait $wrapperB 2>/dev/null
-sleep 9
+sleep 25 # death is noticed on the next poll, up to POLL_S later
 ok 1 "$(cnt 'killall -CONT awesome cvm')" "B: fallback restore CONT"
 ok 2 "$(cnt '^lipc ')" "B: fallback restore lipc x2"
 ok 1 "$(repainted)" "B: saved screen repainted (cvm really was stopped)"
@@ -94,7 +94,7 @@ sleep 60 & wrapperC=$!
 sh "$WD" $wrapperC & wdC=$!
 sleep 2
 kill $wrapperC; wait $wrapperC 2>/dev/null
-sleep 9
+sleep 25 # same detection window as B before asserting nothing happened
 ok 0 "$(cnt 'killall')" "C: no restore on normal exit"
 ok 0 "$(cnt '^lipc ')" "C: no lipc on normal exit"
 ok 0 "$(repainted)" "C: no stale screen flashed over the live framework"
@@ -110,7 +110,7 @@ stale_ping
 sleep 120 & wrapperD=$!
 echo $wrapperD > "$T/wrapper.pid"
 sh "$WD" $wrapperD & wdD=$!
-sleep 22
+sleep 65 # two kills then escalation: ~3 stale polls apart at POLL_S each
 ok 2 "$(cnt 'killall -9 aiquota')" "D: two kill attempts, then escalation"
 ok 1 "$(cnt 'killall -CONT awesome cvm')" "D: escalated restore while wrapper still alive"
 ok 1 "$(repainted)" "D: saved screen repainted on escalation"

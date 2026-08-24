@@ -378,7 +378,7 @@ static void draw_button_text(const Ui *ui, int i, int inverted)
  * 1/3 of content_w each, with thin vertical separators between them. */
 static void draw_buttons(Ui *ui, int y, int loading)
 {
-    static const char *const labels[3] = { "刷新", "接口地址", "关闭" };
+    static const char *const labels[3] = { "刷新", "设置", "关闭" };
     int bw = ui->content_w / 3;
     int bx = ui->h_padding;
     int i;
@@ -498,8 +498,8 @@ void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
 
 UiAction ui_hit_button(const Ui *ui, int x, int y)
 {
-    static const UiAction actions[3] = { UI_ACTION_REFRESH, UI_ACTION_EDIT_URL,
-                                         UI_ACTION_CLOSE };
+    static const UiAction actions[3] = { UI_ACTION_REFRESH, UI_ACTION_SETTINGS,
+                                          UI_ACTION_CLOSE };
     int i;
 
     if (!ui || !ui->btn_row_drawn)
@@ -525,7 +525,7 @@ void ui_flash_button(Ui *ui, int fbfd, UiAction action)
     case UI_ACTION_REFRESH:
         idx = 0;
         break;
-    case UI_ACTION_EDIT_URL:
+    case UI_ACTION_SETTINGS:
         idx = 1;
         break;
     case UI_ACTION_CLOSE:

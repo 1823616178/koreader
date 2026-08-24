@@ -152,6 +152,8 @@ static void test_config_roundtrip(void)
     CHECK(strcmp(cfg.api_url, "http://123.161.179.32:46927/api/usage") == 0);
     CHECK(cfg.touch_swap_xy == 0 && cfg.touch_mirror_x == 0 && cfg.touch_mirror_y == 0);
     CHECK(cfg.idle_timeout_s == CONFIG_IDLE_TIMEOUT_DEFAULT);
+    CHECK(cfg.wifi_auto_off == CONFIG_WIFI_AUTO_OFF_DEFAULT);
+    CHECK(cfg.auto_refresh_min == CONFIG_AUTO_REFRESH_DEFAULT);
 
     /* Missing file: -1, defaults kept. */
     CHECK(config_load(&cfg, "/tmp/aiquota_no_such_file_9f3b2.ini") == -1);
@@ -164,6 +166,8 @@ static void test_config_roundtrip(void)
     cfg.touch_mirror_x = 1;
     cfg.touch_mirror_y = 0;
     cfg.idle_timeout_s = 900;
+    cfg.wifi_auto_off = 0;
+    cfg.auto_refresh_min = 15;
     CHECK(config_save(&cfg, path) == 0);
 
     config_defaults(&back);
@@ -173,6 +177,8 @@ static void test_config_roundtrip(void)
     CHECK(back.touch_mirror_x == 1);
     CHECK(back.touch_mirror_y == 0);
     CHECK(back.idle_timeout_s == 900);
+    CHECK(back.wifi_auto_off == 0);
+    CHECK(back.auto_refresh_min == 15);
 
     /* Idle timeout is clamped, never disabled: an unbounded wait would leave
      * the framework frozen with nothing left to time it out. */
@@ -182,17 +188,40 @@ static void test_config_roundtrip(void)
     CHECK(config_clamp_idle_timeout(999999) == CONFIG_IDLE_TIMEOUT_MAX);
     CHECK(config_clamp_idle_timeout(120) == 120);
 
-    /* Loaded api_url goes through normalizeUrl. */
+    /* Auto-refresh: non-positive is "off", anything above the cap saturates. */
+    CHECK(config_clamp_auto_refresh(0) == 0);
+    CHECK(config_clamp_auto_refresh(-7) == 0);
+    CHECK(config_clamp_auto_refresh(1) == 1);
+    CHECK(config_clamp_auto_refresh(7) == 7);
+    CHECK(config_clamp_auto_refresh(999999) == CONFIG_AUTO_REFRESH_MAX);
+
+    /* Loaded api_url goes through normalizeUrl; new keys parse + clamp from
+     * raw text (auto_refresh_min over the cap lands on the cap). */
     f = fopen(path, "w");
     CHECK(f != NULL);
     if (f) {
-        fputs("api_url=example.com:9\ntouch_mirror_y=1\nunknown_key=zzz\n", f);
+        fputs("api_url=example.com:9\ntouch_mirror_y=1\n"
+              "wifi_auto_off=0\nauto_refresh_min=999\nunknown_key=zzz\n", f);
         fclose(f);
         config_defaults(&back);
         CHECK(config_load(&back, path) == 0);
         CHECK(strcmp(back.api_url, "http://example.com:9/api/usage") == 0);
         CHECK(back.touch_mirror_y == 1);
         CHECK(back.touch_swap_xy == 0);
+        CHECK(back.wifi_auto_off == 0);
+        CHECK(back.auto_refresh_min == CONFIG_AUTO_REFRESH_MAX);
+    }
+
+    /* wifi_auto_off=0 in text parses as off even with junk values. */
+    f = fopen(path, "w");
+    CHECK(f != NULL);
+    if (f) {
+        fputs("wifi_auto_off=abc\nauto_refresh_min=-3\n", f);
+        fclose(f);
+        config_defaults(&back);
+        CHECK(config_load(&back, path) == 0);
+        CHECK(back.wifi_auto_off == 0); /* atoi("abc")==0 -> false -> 0 */
+        CHECK(back.auto_refresh_min == 0);
     }
 }
 
@@ -470,10 +499,17 @@ static void test_net_ensure_wifi_no_lipc(void)
      * spin through the full 20 s on-device timeout. */
     time_t start = time(NULL);
     int rc = net_ensure_wifi();
+
     double elapsed = difftime(time(NULL), start);
 
     CHECK(rc == -1);
     CHECK(elapsed < 5.0);
+
+    /* The failed ensure raised the radio on-device, so ownership says a
+     * release is owed; off-device system() is a harmless no-op. Repeat
+     * calls must stay safe (release clears its flag before acting). */
+    net_release_wifi();
+    net_release_wifi();
 }
 
 /* --- input_wait_tap harness -------------------------------------------------

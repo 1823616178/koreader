@@ -165,7 +165,7 @@ cat /dev/input/event0                                        # 逐个试，找�
   - 单个提供商或窗口为 `null` 时，只把该项显示成「暂无数据」，绝不影响其他卡片
   - 用类型判断而非真值判断（`0` 是合法的 `used` 值）
   - `clamp` 到 0–100
-- `net.c` —— 启动时若 `cmState != CONNECTED`，执行 `lipc-set-prop -i com.lab126.cmd wirelessEnable 1` 并轮询等待，超时 20 秒。wifid 是独立守护进程，不受 cvm 冻结影响。
+- `net.c` —— 拉取前若 `cmState != CONNECTED`，执行 `lipc-set-prop -i com.lab126.cmd wirelessEnable 1` 并轮询等待，超时 20 秒。wifid 是独立守护进程，不受 cvm 冻结影响。拉取完成后按「谁开的谁关」原则释放：只有射频是本应用唤醒的才执行 `wirelessEnable 0`（`net_release_wifi()`，幂等），用户预先连着的连接不动——空闲期射频完全离线，这是整机最大的省电项。
 - `config.c` —— URL 归一化照搬 `quotadata.lua:49-62`：补 `http://` 前缀、去掉尾部斜杠、补 `/api/usage` 后缀。
 
 **验收：** SSH 里直接跑二进制，能拉到真实数据并正确渲染。
@@ -244,7 +244,7 @@ exec sh /mnt/us/extensions/aiquota/bin/aiquota.sh
 
 | 风险 | 严重度 | 缓解 |
 | --- | --- | --- |
-| **冻结 framework 后程序崩溃 → 系统卡死，只能强制重启** | 高 | 六层防御，详见 `kindle/README.md` §9：① 脚本 `trap restore_framework EXIT INT HUP` 无条件恢复（恢复逻辑在 `bin/restore.sh`，冻结前先 source 进内存）＋二进制里的 SIGSEGV / SIGABRT handler；② OOM 优先级反转（脚本 `-1000`、应用 `+1000`），让内存压力只杀应用；③ 独立会话的看门狗兜底恢复；④ 心跳见证主线程（每个阻塞调用先 `wd_expect()` 报备上限），假死 60 秒后强杀；⑤ 杀不掉（D 状态）就由看门狗直接解冻；⑥ 空闲 `idle_timeout_s` 秒自动退出。手动兜底：`sh .../bin/restore.sh`。开发期全程挂 USBNetwork/SSH |
+| **冻结 framework 后程序崩溃 → 系统卡死，只能强制重启** | 高 | 六层防御，详见 `kindle/README.md` §9：① 脚本 `trap restore_framework EXIT INT HUP` 无条件恢复（恢复逻辑在 `bin/restore.sh`，冻结前先 source 进内存）＋二进制里的 SIGSEGV / SIGABRT handler；② OOM 优先级反转（脚本 `-1000`、应用 `+1000`），让内存压力只杀应用；③ 独立会话的看门狗兜底恢复；④ 心跳见证主线程（每个阻塞调用先 `wd_expect()` 报备上限），假死 120 秒后强杀；⑤ 杀不掉（D 状态）就由看门狗直接解冻；⑥ 空闲 `idle_timeout_s` 秒自动退出。手动兜底：`sh .../bin/restore.sh`。开发期全程挂 USBNetwork/SSH |
 | 从 KUAL 启动被级联杀死 | 中 | `trap "" TERM` + `killall -STOP`，不用 `stop lab126_gui`（见 §6） |
 | 触摸坐标变换因机型而异（可能要 swap / mirror） | 中 | 内置 `--calibrate` 模式，标定结果写进配置文件 |
 | 5.16.2.1.1 上 lipc 属性名与参考实现有出入 | 中 | 阶段 0 先在设备上逐条手工验证，再写死进脚本 |

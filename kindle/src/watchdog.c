@@ -9,9 +9,12 @@
 #include <time.h>
 #include <unistd.h>
 
-/* One beat every 15 s against watchdog.sh's 60 s staleness threshold: four
- * beats of margin, so a single delayed beat can never look like a wedge. */
-#define WD_BEAT_S 15
+/* One beat every 30 s against watchdog.sh's 120 s staleness threshold: four
+ * beats of margin, so a single delayed beat can never look like a wedge.
+ * Each beat is a CPU wake from suspend; 30 s halves that churn vs 15 s and
+ * still catches a wedged main thread well inside a minute of it wedging
+ * (detection latency is bounded by watchdog.sh's two-confirm rule). */
+#define WD_BEAT_S 30
 
 static pthread_mutex_t wd_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Epoch second the main thread promised to be back by; 0 = not armed yet

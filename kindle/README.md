@@ -10,7 +10,7 @@
 
 ```
 kindle/
-  src/            C 源码：main / ui / keypad / quota / http / input / config / net / watchdog
+  src/            C 源码：main / ui / keypad / settings / quota / http / input / config / net / watchdog
   third_party/    vendored 依赖：cJSON（JSON 解析）、fbink.h + libfbink.a（静态链接）
   fonts/          NotoSansSC.ttf（完整字体，不入库）+ 构建时生成的子集
   extension/      KUAL 扩展，部署到 /mnt/us/extensions/aiquota/
@@ -55,6 +55,8 @@ make staticlib KINDLE=true MINIMAL=true DRAW=true OPENTYPE=true CROSS_TC=arm-kin
 
 ## 4. 部署
 
+> 完整的装机流程（含首次运行的安全顺序、故障处理、升级与卸载）见 [`install.md`](install.md)。下面是简版。
+
 前提：Kindle 已越狱，装好 KUAL 和 SH_Integration（Scriptlet 支持）。
 
 1. USB 连接，把 `dist/aiquota-kindle.tar.gz` 拷到 Kindle 的 USB 根目录。
@@ -76,12 +78,25 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 启动后脚本会冻结 Amazon framework（SIGSTOP），应用独占屏幕。界面三个按钮：
 
 - **刷新** —— 重新向配置的接口拉取数据。
-- **接口地址** —— 弹出数字键盘修改 API 地址。键盘只有 `0-9 . :`（外加退格 / 确定 / 取消），面向 `IP:端口` 形式的地址；要用域名或带路径的地址，请通过 USB 直接改配置文件（见下节）。
+- **设置** —— 打开机内设置页（见下节），接口地址 / WiFi / 自动刷新 / 自动退出都在这里改。
 - **关闭** —— 退出应用，脚本自动恢复 framework。
+
+**省电行为**：每次拉取数据时才唤醒 WiFi，拉完立即交还——且只有「应用自己开的射频」才会被关掉，进应用前就连着的 WiFi 不受影响。空闲期射频完全离线；e-ink 靠自身稳态保持画面，不需要供电。
+
+### 设置页
+
+| 行 | 值 | 点按行为 |
+| --- | --- | --- |
+| 接口地址 | 当前地址的 host 部分 | 弹数字键盘编辑完整 URL |
+| 刷新后关WiFi | 开 / 关 | 直接切换。关掉后拉取完成的 WiFi 保持连接 |
+| 自动刷新 | 关闭 / N 分钟 | 弹键盘输入，0=关闭、1–60 分钟。到点自动开 WiFi 拉一次再关 |
+| 自动退出 | N 秒 | 弹键盘输入，60–3600 秒无触摸自动退出 |
+
+改动在点「返回」时写入配置文件并立即生效；改接口地址会顺带重新拉取一次。自动刷新**不会**重置空闲计时——人离开后应用最多再刷到 `idle_timeout_s` 到点就退出。
 
 ## 6. 配置
 
-配置文件是 `/mnt/us/extensions/aiquota/config`，位于 FAT32 分区，插 USB 就能在电脑上直接编辑，改完重新打开应用生效。五个键：
+配置文件是 `/mnt/us/extensions/aiquota/config`，位于 FAT32 分区，插 USB 就能在电脑上直接编辑；应用内的「设置」页改的就是同一份文件，改完即存。七个键：
 
 | 键 | 含义 |
 | --- | --- |
@@ -90,6 +105,8 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 | `touch_mirror_x` | 触摸 X 轴镜像（0/1） |
 | `touch_mirror_y` | 触摸 Y 轴镜像（0/1） |
 | `idle_timeout_s` | 多少秒没有触摸就自动退出、交还 framework。范围 60–3600，写 0 或非法值取默认 600 |
+| `wifi_auto_off` | 拉取完成后是否关掉「由应用自己开启的」WiFi（默认 1）。写 0 则拉完保持连接 |
+| `auto_refresh_min` | 自动刷新间隔（分钟），默认 0=关闭，范围 1–60，超界取 60 |
 
 `api_url` 会做归一化（与 KOReader 版 `quotadata.lua` 同逻辑）：没有 scheme 就补 `http://`、去掉尾部斜杠、结尾不是 `/api/usage` 就补上。例如写 `123.161.179.32:46927` 等价于 `http://123.161.179.32:46927/api/usage`。
 
@@ -126,7 +143,10 @@ touch_mirror_y=0
 8. **断电重启**：长按电源完整重启一次，确认没有残留的冻结进程或被改动的 lipc 状态。
 9. **空闲自动退出**：把 `idle_timeout_s` 临时改成 `60`，从 KUAL 启动后放着不动，确认一分钟后应用自己退出、framework 恢复。
 10. **手动兜底演练**：从 KUAL 启动，然后在 SSH 里 `sh /mnt/us/extensions/aiquota/bin/restore.sh`，确认 framework 立刻回来。这条要在真机上验证过，出事时才敢用。
-11. **看门狗强杀**：从 KUAL 启动后，SSH 里 `kill -STOP $(pidof aiquota)` 制造假死，确认约 60–70 秒后应用被 `kill -9`、framework 自动恢复。
+11. **看门狗强杀**：从 KUAL 启动后，SSH 里 `kill -STOP $(pidof aiquota)` 制造假死，确认约 2–2.5 分钟后应用被 `kill -9`、framework 自动恢复（心跳 30 秒一次 + 看门狗连续两次确认）。
+12. **设置页持久化**：KUAL 启动 → 设置 → 改自动刷新为 5 分钟、关掉「刷新后关WiFi」→ 返回 → 退出应用重新进入，确认值都还在；USB 连电脑 diff 一下 `config` 文件应出现这两行。
+13. **WiFi 所有权**：先在系统里断开 WiFi 再进应用拉取一次，SSH 里 `lipc-get-prop com.lab126.wifid cmState` 应回到非 CONNECTED；反过来先连好 WiFi 再进应用拉取，拉完 cmState 应仍是 CONNECTED。
+14. **自动刷新**：设置 `auto_refresh_min=1` 后开着页面放一分多钟，确认屏幕自己更新了一次数据、且射频窗口只有几秒；把设备放着不动，确认到 `idle_timeout_s` 后仍会自动退出。
 
 ## 9. 风险提示
 
@@ -135,7 +155,7 @@ touch_mirror_y=0
 1. **包装脚本兜底**：`bin/aiquota.sh` 用 `trap restore_framework EXIT INT HUP` 保证应用以任何方式退出（正常关闭、崩溃、被 kill）都恢复 framework；`trap "" TERM` 挡住 KUAL 退出时的级联 SIGTERM。二进制内部的 SIGSEGV / SIGABRT handler 保证崩溃时进程立刻退出、让 trap 触发。恢复逻辑本身放在 `bin/restore.sh`，包装脚本在**冻结之前**就把它 source 进内存（trap 不能依赖再去读一次 `/mnt/us`），source 失败直接退出——绝不在没有退路的情况下冻结。
 2. **OOM 优先级反转**：包装脚本和看门狗把自己的 `oom_score_adj` 设成 `-1000`（对 OOM killer 免疫），应用则设成 `+1000`（OOM killer 的第一顺位）。内存压力下死的一定是应用，第 1 层的 trap 随即恢复 framework——OOM 事件从"系统卡死"变成"应用被正常关闭"。这一条直接堵掉了 SIGKILL 唯一的现实来源。
 3. **独立看门狗**：`bin/aiquota.sh` 启动应用前先用 `setsid` 拉起 `bin/watchdog.sh`（屏蔽 TERM/INT/HUP 的独立会话）。万一包装脚本仍被 SIGKILL 导致 trap 来不及执行，看门狗发现 `/proc` 里 cvm 仍处于 STOP 状态时会代为恢复。正常退出时它什么都不做。
-4. **心跳防假死**：应用每 15 秒写一次 `/var/tmp/aiquota.ping`，但**心跳线程只在主线程"报备过的时间窗内"才写**——每一个会阻塞的调用（WiFi 唤醒、DNS、connect、收发、等触摸）都先用 `wd_expect()` 声明自己的上限（`src/watchdog.h`）。主线程死循环或超期不归，心跳就停。看门狗发现心跳超过 60 秒且连续两次确认后 `kill -9` 应用，第 1 层的 trap 立即恢复 framework。整个应用不再有任何无上限的等待。
+4. **心跳防假死**：应用每 30 秒写一次 `/var/tmp/aiquota.ping`，但**心跳线程只在主线程"报备过的时间窗内"才写**——每一个会阻塞的调用（WiFi 唤醒、DNS、connect、收发、等触摸）都先用 `wd_expect()` 声明自己的上限（`src/watchdog.h`）。主线程死循环或超期不归，心跳就停。看门狗发现心跳超过 120 秒且连续两次确认后 `kill -9` 应用，第 1 层的 trap 立即恢复 framework。整个应用不再有任何无上限的等待。
 5. **杀不掉就直接解冻**：`kill -9` 对 D 状态（不可中断睡眠）的进程无效，此时等包装脚本的 trap 等于永远等下去。看门狗连试两次仍杀不掉，就不再等待，自己恢复 framework 然后退出。用户立刻拿回设备，framework 会重绘盖掉卡住的应用，残留进程留到下次重启清理。
 6. **空闲自动退出**：连续 `idle_timeout_s`（默认 600 秒）没有触摸，应用自己退出并交还 framework。触摸设备静默、用户走开、误触启动——这些都变成自愈而不是无限期占着冻结状态。
 
