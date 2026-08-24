@@ -7,11 +7,14 @@
  * Returns an open fd (O_RDONLY) or -1 if none found. */
 int  input_open(void);
 
-/* Blocking wait for one tap; returns 0 and fills screen-space x,y (config transform applied),
- * or -1 on error. Groups events by SYN_REPORT; tap = touch contact down->up with small movement.
- * Blocks indefinitely: returns only on a tap or a device error -- there is no timeout.
+/* Wait for one tap; returns 0 and fills screen-space x,y (config transform applied),
+ * 1 when timeout_s elapsed with no tap, or -1 on error. Groups events by SYN_REPORT;
+ * tap = touch contact down->up with small movement.
+ * timeout_s is the budget for the WHOLE call, measured from entry, so a stream of
+ * ignored gestures (drags) cannot extend it; timeout_s <= 0 waits indefinitely.
  * Uses the device ranges captured by input_open, so call input_open first, same process. */
-int  input_wait_tap(int fd, int scr_w, int scr_h, const AppConfig *cfg, int *x, int *y);
+int  input_wait_tap(int fd, int scr_w, int scr_h, const AppConfig *cfg, int timeout_s,
+                    int *x, int *y);
 
 /* Pure coordinate transform, exposed for unit tests:
  * scale raw evdev ABS_MT ranges into screen pixels, then apply swap/mirror from cfg. */

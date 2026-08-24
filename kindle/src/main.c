@@ -10,8 +10,6 @@
  * and the wrapper script (extension/bin/aiquota.sh) restores the framework. */
 #define _POSIX_C_SOURCE 200809L /* sigaction */
 
-#include <fcntl.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,8 +24,10 @@
 #include "net.h"
 #include "quota.h"
 #include "ui.h"
+#include "watchdog.h"
 
 #define FONT_PATH "/mnt/us/extensions/aiquota/bin/NotoSansSC-subset.ttf"
+#define PING_PATH "/var/tmp/aiquota.ping"
 #define DETAIL_SIZE 600 /* holds a 512-char URL or an error line */
 
 /* Dashboard states; the keypad is a sub-mode handled inside the main loop. */
@@ -114,6 +114,21 @@ static void fatal_signal(int sig)
     _exit(1);
 }
 
+/* Install unless the signal came in already ignored. SIG_IGN is inherited
+ * across exec, and the wrapper's `trap "" TERM` (which exists to survive KUAL's
+ * cascading SIGTERM) hands us exactly that: overriding it would make the app
+ * die on the very group signal the wrapper set out to absorb, and the wrapper
+ * would then restore the framework the moment we started. Run standalone over
+ * SSH nothing is ignored, so the handler is installed as usual. */
+static void install_fatal_handler(int sig, const struct sigaction *sa)
+{
+    struct sigaction old;
+
+    if (sigaction(sig, NULL, &old) == 0 && old.sa_handler == SIG_IGN)
+        return;
+    sigaction(sig, sa, NULL);
+}
+
 static void install_signal_handlers(void)
 {
     struct sigaction sa;
@@ -122,45 +137,27 @@ static void install_signal_handlers(void)
     sa.sa_handler = fatal_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0; /* no SA_RESTART: a fatal must not leave reads blocking */
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGABRT, &sa, NULL);
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
+    install_fatal_handler(SIGSEGV, &sa);
+    install_fatal_handler(SIGABRT, &sa);
+    install_fatal_handler(SIGINT, &sa);
+    install_fatal_handler(SIGTERM, &sa);
 }
 
-/* Watchdog heartbeat. extension/bin/watchdog.sh kill -9s the app when this
- * file's mtime goes stale, so a wedged process can never leave the Kindle
- * framework frozen. The worst legitimate blocking call is the ~95 s HTTP
- * fetch; beating every 30 s with a 180 s watchdog tolerance leaves margin.
- * A detached thread (not alarm()) so no signal ever interrupts the evdev or
- * socket syscalls on the main thread. */
-#define PING_PATH "/var/tmp/aiquota.ping"
-
-static void *heartbeat_main(void *arg)
+/* One tap wait, wrapped in the heartbeat contract (see watchdog.h): announce
+ * the whole idle budget before blocking, then drop back to the short local-
+ * work bound. With this, the app has no unbounded wait left anywhere, which
+ * is what lets watchdog.sh read a missing beat as "wedged" rather than "the
+ * user put the Kindle down".
+ * Returns 0 tap / 1 idle timeout / -1 device error, like input_wait_tap. */
+static int wait_tap(int fd, int scr_w, int scr_h, const AppConfig *cfg,
+                    int *x, int *y)
 {
-    int fd = *(const int *)arg;
+    int rc;
 
-    for (;;) {
-        if (write(fd, ".", 1) != 1)
-            break; /* /var/tmp went away: nothing more we can do */
-        sleep(30);
-    }
-    return NULL;
-}
-
-static void start_heartbeat(void)
-{
-    static int ping_fd; /* static: the thread reads it after the call returns */
-    pthread_t tid;
-
-    ping_fd = open(PING_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (ping_fd < 0)
-        return; /* non-fatal: the watchdog just never sees a file */
-    if (pthread_create(&tid, NULL, heartbeat_main, &ping_fd) != 0) {
-        close(ping_fd);
-        return;
-    }
-    pthread_detach(tid);
+    wd_expect(cfg->idle_timeout_s + WD_SLACK_S);
+    rc = input_wait_tap(fd, scr_w, scr_h, cfg, cfg->idle_timeout_s, x, y);
+    wd_expect(WD_STEP_S);
+    return rc;
 }
 
 static void usage(const char *prog)
@@ -422,8 +419,11 @@ static int run_calibrate(int fbfd, int scr_w, int scr_h, int input_fd)
     fflush(stdout); /* the next read blocks; make sure prompts are out */
 
     for (i = 0; i < 4; i++) {
-        if (input_wait_tap(input_fd, scr_w, scr_h, &ccfg, &px[i], &py[i]) != 0) {
-            fprintf(stderr, "aiquota: touch input device lost\n");
+        int wr = wait_tap(input_fd, scr_w, scr_h, &ccfg, &px[i], &py[i]);
+
+        if (wr != 0) {
+            fprintf(stderr, "aiquota: %s\n",
+                    wr > 0 ? "calibration timed out" : "touch input device lost");
             return 1;
         }
         /* raw == screen under the identity mapping (see note above). */
@@ -550,7 +550,9 @@ int main(int argc, char **argv)
         goto out;
     }
 
-    start_heartbeat(); /* every interactive mode; the wrapper's watchdog reads it */
+    /* Every interactive mode; extension/bin/watchdog.sh reads the file. */
+    wd_start(PING_PATH);
+    wd_expect(WD_STEP_S);
 
     if (mode == MODE_CALIBRATE) {
         rc = run_calibrate(fbfd, scr_w, scr_h, input_fd);
@@ -582,18 +584,24 @@ int main(int argc, char **argv)
     /* --- event loop ------------------------------------------------------- */
     for (;;) {
         int x = 0, y = 0;
+        int wr;
         UiAction action;
 
         if (st == ST_LOADING) {
+            wd_expect(WD_STEP_S); /* net.c and http.c re-arm per blocking phase */
             paint_loading(fbfd, ui, host, cfg.api_url);
             st = do_fetch(fbfd, ui, cfg.api_url, host, &snap, &have_good,
                           mode == MODE_DEMO, detail, sizeof(detail));
+            wd_expect(WD_STEP_S);
         }
 
         /* READY/ERROR: wait for a tap on the button row. Note: taps made while
          * a blocking fetch runs stay queued in the kernel evdev buffer and are
          * hit-tested here against the NEW screen -- harmless (one extra fetch). */
-        if (input_wait_tap(input_fd, scr_w, scr_h, &cfg, &x, &y) != 0) {
+        wr = wait_tap(input_fd, scr_w, scr_h, &cfg, &x, &y);
+        if (wr > 0)
+            break; /* idle: close ourselves so the framework comes back */
+        if (wr < 0) {
             fprintf(stderr, "aiquota: touch input device lost\n");
             rc = 1;
             goto out;
@@ -625,7 +633,10 @@ int main(int argc, char **argv)
             keypad_draw(kp, "接口地址", edit);
             full_refresh(fbfd);
             while (kr == 0) { /* KEYPAD sub-mode */
-                if (input_wait_tap(input_fd, scr_w, scr_h, &cfg, &x, &y) != 0) {
+                wr = wait_tap(input_fd, scr_w, scr_h, &cfg, &x, &y);
+                if (wr > 0)
+                    goto out; /* idle: drop the edit, release the framework */
+                if (wr < 0) {
                     fprintf(stderr, "aiquota: touch input device lost\n");
                     rc = 1;
                     goto out;

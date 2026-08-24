@@ -6,3 +6,7 @@ api_url=http://123.161.179.32:46927/api/usage
 touch_swap_xy=0
 touch_mirror_x=0
 touch_mirror_y=0
+
+# Idle auto-exit: seconds without a tap before the app closes itself and gives
+# the framework back. Clamped to 60..3600; 0 or invalid means the 600 default.
+idle_timeout_s=600

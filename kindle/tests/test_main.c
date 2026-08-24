@@ -26,6 +26,7 @@
 #include "input.h"
 #include "net.h"
 #include "quota.h"
+#include "watchdog.h"
 
 static int failures = 0;
 static const char *current = "";
@@ -150,6 +151,7 @@ static void test_config_roundtrip(void)
     config_defaults(&cfg);
     CHECK(strcmp(cfg.api_url, "http://123.161.179.32:46927/api/usage") == 0);
     CHECK(cfg.touch_swap_xy == 0 && cfg.touch_mirror_x == 0 && cfg.touch_mirror_y == 0);
+    CHECK(cfg.idle_timeout_s == CONFIG_IDLE_TIMEOUT_DEFAULT);
 
     /* Missing file: -1, defaults kept. */
     CHECK(config_load(&cfg, "/tmp/aiquota_no_such_file_9f3b2.ini") == -1);
@@ -161,6 +163,7 @@ static void test_config_roundtrip(void)
     cfg.touch_swap_xy = 1;
     cfg.touch_mirror_x = 1;
     cfg.touch_mirror_y = 0;
+    cfg.idle_timeout_s = 900;
     CHECK(config_save(&cfg, path) == 0);
 
     config_defaults(&back);
@@ -169,6 +172,15 @@ static void test_config_roundtrip(void)
     CHECK(back.touch_swap_xy == 1);
     CHECK(back.touch_mirror_x == 1);
     CHECK(back.touch_mirror_y == 0);
+    CHECK(back.idle_timeout_s == 900);
+
+    /* Idle timeout is clamped, never disabled: an unbounded wait would leave
+     * the framework frozen with nothing left to time it out. */
+    CHECK(config_clamp_idle_timeout(0) == CONFIG_IDLE_TIMEOUT_DEFAULT);
+    CHECK(config_clamp_idle_timeout(-5) == CONFIG_IDLE_TIMEOUT_DEFAULT);
+    CHECK(config_clamp_idle_timeout(1) == CONFIG_IDLE_TIMEOUT_MIN);
+    CHECK(config_clamp_idle_timeout(999999) == CONFIG_IDLE_TIMEOUT_MAX);
+    CHECK(config_clamp_idle_timeout(120) == 120);
 
     /* Loaded api_url goes through normalizeUrl. */
     f = fopen(path, "w");
@@ -525,7 +537,8 @@ static int tap_detected(const struct tap_event *events, size_t count,
 
         config_defaults(&cfg);
         alarm(2); /* watchdog: a stuck wait fails the case */
-        rc = input_wait_tap(pfd[0], scr_w, scr_h, &cfg, &x, &y);
+        /* timeout_s 0: these cases end on EOF, the timeout has its own test. */
+        rc = input_wait_tap(pfd[0], scr_w, scr_h, &cfg, 0, &x, &y);
         _exit(rc == 0 ? 0 : 1);
     }
 
@@ -606,6 +619,76 @@ static void test_input_wait_tap(void)
     CHECK(tap_detected(tap_stale_pos, sizeof(tap_stale_pos) / sizeof(tap_stale_pos[0]), 600, 800) == 1);
 }
 
+/* The idle timeout is what releases the frozen framework when the user walks
+ * away, so it must fire on a silent-but-open device -- not only on EOF. The
+ * write end stays open in the parent: without a timeout this would hang until
+ * the alarm kills the child. */
+static void test_input_wait_tap_timeout(void)
+{
+    AppConfig cfg;
+    int pfd[2];
+    pid_t pid;
+    int status;
+    time_t started;
+
+    config_defaults(&cfg);
+    if (pipe(pfd) != 0) {
+        CHECK(0);
+        return;
+    }
+
+    started = time(NULL);
+    pid = fork();
+    if (pid < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        CHECK(0);
+        return;
+    }
+    if (pid == 0) {
+        int x = -1, y = -1, rc;
+
+        close(pfd[1]);
+        alarm(10); /* a wait that ignores its timeout must not hang the suite */
+        rc = input_wait_tap(pfd[0], 600, 800, &cfg, 1, &x, &y);
+        _exit(rc == 1 ? 0 : 1);
+    }
+
+    close(pfd[0]);
+    CHECK(waitpid(pid, &status, 0) >= 0);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(time(NULL) - started < 5);
+    close(pfd[1]);
+}
+
+/* The beat must witness the main thread: past the announced deadline it stops,
+ * which is what turns a main-thread hang into a watchdog.sh kill. */
+static void test_wd_should_beat(void)
+{
+    long long now = (long long)time(NULL);
+
+    CHECK(wd_should_beat(now)); /* not armed yet: beat freely */
+
+    wd_expect(30);
+    CHECK(wd_should_beat(now));
+    CHECK(wd_should_beat(now + 29));
+    CHECK(!wd_should_beat(now + 31));
+
+    /* Re-arming from inside a long phase pushes the deadline out again. */
+    wd_expect(120);
+    CHECK(wd_should_beat(now + 31));
+    CHECK(!wd_should_beat(now + 121));
+
+    /* A shorter announcement takes effect immediately (no max() on the old
+     * deadline), so a fast phase cannot inherit a slow phase's slack. */
+    wd_expect(5);
+    CHECK(!wd_should_beat(now + 31));
+
+    /* Non-positive is treated as "one second", never as "forever". */
+    wd_expect(0);
+    CHECK(!wd_should_beat(now + 10));
+}
+
 int main(void)
 {
     RUN(test_normalize_url);
@@ -621,6 +704,8 @@ int main(void)
     RUN(test_http_get);
     RUN(test_input_transform);
     RUN(test_input_wait_tap);
+    RUN(test_input_wait_tap_timeout);
+    RUN(test_wd_should_beat);
     RUN(test_net_ensure_wifi_no_lipc);
 
     if (failures == 0) {

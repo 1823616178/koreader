@@ -11,9 +11,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #define INPUT_MAX_DEVICE 15 /* probe /dev/input/event0 .. event15 */
@@ -121,9 +123,14 @@ void input_transform(const AppConfig *cfg, int scr_w, int scr_h,
     *y = (int)sy;
 }
 
-int input_wait_tap(int fd, int scr_w, int scr_h, const AppConfig *cfg, int *x, int *y)
+int input_wait_tap(int fd, int scr_w, int scr_h, const AppConfig *cfg, int timeout_s,
+                   int *x, int *y)
 {
     const long tap_threshold = (scr_w + scr_h) / 40; /* ~2.5% of screen size */
+    /* Whole-call deadline in wall-clock seconds. Second resolution is ample
+     * for a multi-minute idle timeout, and time() keeps this off librt (the
+     * kindlepw2 sysroot is glibc 2.12, where clock_gettime still needs it). */
+    const time_t deadline = time(NULL) + (timeout_s > 0 ? timeout_s : 0);
 
     int tracking = 0;   /* a contact is currently down */
     int ended = 0;      /* contact ended during the current frame */
@@ -136,8 +143,29 @@ int input_wait_tap(int fd, int scr_w, int scr_h, const AppConfig *cfg, int *x, i
 
     for (;;) {
         struct input_event ev;
-        ssize_t n = read(fd, &ev, sizeof(ev));
+        ssize_t n;
 
+        if (timeout_s > 0) {
+            struct pollfd pfd;
+            time_t now = time(NULL);
+            int rc;
+
+            if (now >= deadline)
+                return 1;
+            pfd.fd = fd;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            rc = poll(&pfd, 1, (int)(deadline - now) * 1000);
+            if (rc == 0)
+                return 1;
+            if (rc < 0) {
+                if (errno == EINTR)
+                    continue;
+                return -1;
+            }
+        }
+
+        n = read(fd, &ev, sizeof(ev));
         if (n < 0) {
             if (errno == EINTR)
                 continue;

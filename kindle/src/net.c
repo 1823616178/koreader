@@ -11,8 +11,16 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "watchdog.h"
+
 #define WIFI_POLL_US 500000L     /* 500 ms between cmState polls */
 #define WIFI_TIMEOUT_US 20000000L /* 20 s overall wakeup budget */
+/* Watchdog bound for one lipc call. popen/system fork a shell and neither has
+ * a timeout, so a hung lipc binary would otherwise block here forever; 30 s is
+ * far more than a fork+exec needs even under memory pressure. The bound is
+ * re-armed per call rather than once for the whole function, because the poll
+ * loop's own budget counts only its sleeps, not the probes in between. */
+#define NET_CMD_S 30
 
 /* Probe wifid state through lipc. Returns 1 when cmState is CONNECTED,
  * 0 when lipc answered something else, -1 when there was no usable
@@ -23,6 +31,7 @@ static int wifi_probe(void)
     char buf[128];
     int result = -1;
 
+    wd_expect(NET_CMD_S);
     p = popen("lipc-get-prop com.lab126.wifid cmState 2>/dev/null", "r");
     if (!p)
         return -1;
@@ -41,7 +50,7 @@ int net_ensure_wifi(void)
 {
     long waited = 0;
     int empty_streak = 0;
-    int state = wifi_probe();
+    int state = wifi_probe(); /* arms the watchdog itself */
 
     if (state == 1)
         return 0;
@@ -50,7 +59,10 @@ int net_ensure_wifi(void)
 
     /* Ask the connection manager to enable WiFi (instant no-op off-device). */
     {
-        int rc = system("lipc-set-prop -i com.lab126.cmd wirelessEnable 1 2>/dev/null");
+        int rc;
+
+        wd_expect(NET_CMD_S);
+        rc = system("lipc-set-prop -i com.lab126.cmd wirelessEnable 1 2>/dev/null");
         (void)rc;
     }
 

@@ -15,10 +15,19 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
+
+#include "watchdog.h"
 
 #define CONNECT_TIMEOUT_MS 45000 /* 45 s floor: the API cold-starts local services */
 #define IO_TIMEOUT_S 50
+/* getaddrinfo has no timeout of its own; the resolver's own retry schedule
+ * caps out around 40 s against an unreachable nameserver. Watchdog bound only. */
+#define DNS_TIMEOUT_S 60
+/* Per-recv timeouts alone do not bound the read loop: a server dribbling one
+ * byte every 49 s would keep it alive forever. Cap the whole body read. */
+#define BODY_TIMEOUT_S 120
 #define MAX_RESPONSE_BYTES (1024 * 1024) /* payload is ~1 KB JSON; runaway protection */
 
 static void set_err(char *errbuf, size_t errbuf_size, const char *msg)
@@ -209,6 +218,7 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
     const char *body_start;
     char *hdr_end;
     char *body;
+    time_t body_deadline;
     int gai_rc;
 
     if (errbuf && errbuf_size > 0)
@@ -220,6 +230,7 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
+    wd_expect(DNS_TIMEOUT_S);
     gai_rc = getaddrinfo(host, port, &hints, &res);
     if (gai_rc != 0) {
         if (errbuf && errbuf_size > 0)
@@ -230,6 +241,7 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
     for (ai = res; ai; ai = ai->ai_next) {
         if (errbuf && errbuf_size > 0)
             errbuf[0] = '\0';
+        wd_expect(CONNECT_TIMEOUT_MS / 1000 + WD_SLACK_S); /* re-armed per address */
         fd = connect_timeout(ai, errbuf, errbuf_size);
         if (fd >= 0)
             break;
@@ -253,6 +265,7 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
                            "Connection: close\r\n"
                            "\r\n",
                            path, host);
+    wd_expect(IO_TIMEOUT_S + WD_SLACK_S);
     if (request_len < 0 || (size_t)request_len >= sizeof(request) ||
         send_all(fd, request, (size_t)request_len, errbuf, errbuf_size) != 0) {
         if (errbuf && errbuf_size > 0 && errbuf[0] == '\0')
@@ -269,8 +282,15 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
         close(fd);
         return NULL;
     }
+    body_deadline = time(NULL) + BODY_TIMEOUT_S;
     for (;;) {
         ssize_t n;
+        if (time(NULL) > body_deadline) {
+            set_err(errbuf, errbuf_size, "timeout");
+            free(data);
+            close(fd);
+            return NULL;
+        }
         if (len == cap) {
             char *bigger;
             /* A response reaching the cap is rejected, whether or not it
@@ -296,6 +316,7 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
         n = recv(fd, data + len, cap - len, 0);
         if (n > 0) {
             len += (size_t)n;
+            wd_expect(IO_TIMEOUT_S + WD_SLACK_S); /* progress: re-arm */
         } else if (n == 0) {
             break;
         } else if (errno == EINTR) {
