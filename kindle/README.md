@@ -19,6 +19,7 @@ kindle/
     config        运行时配置文件（key=value）
     icon.png      书库 Scriptlet 的图标
     bin/aiquota.sh  framework 接管 / 恢复 + 启动二进制
+    bin/watchdog.sh 独立会话看门狗：包装脚本被杀或应用卡死时兜底恢复 framework
     bin/aiquota     构建产物（ARM 单二进制）
   scriptlet/      书库入口 ai-quota.sh，部署到 /mnt/us/documents/
   Makefile        交叉编译入口
@@ -121,9 +122,13 @@ touch_mirror_y=0
 
 ## 9. 风险提示
 
-最高危的一条（设计文档 §7）：**冻结 framework 之后如果程序崩溃，系统将呈现卡死状态**。缓解措施已经内置——包装脚本 `bin/aiquota.sh` 用 `trap restore_framework EXIT INT HUP` 保证无论以何种方式退出都会恢复 framework，二进制内部也装了 SIGSEGV / SIGABRT handler 先恢复再退出。但开发调试期间请始终保持 USBNetwork / SSH 可用作为兜底。
+最高危的一条（设计文档 §7）：**冻结 framework 之后如果程序崩溃，系统将呈现卡死状态**。为此内置了三层防御，做到任何软件层面的故障都自愈、不需要强制重启：
 
-如果真的遇到 KUAL 启动后卡死，**长按电源键强制重启即可完全恢复**：framework 是被 SIGSTOP 冻结的，不是被 stop，冻结状态不持久，重启后一切如常。
+1. **包装脚本兜底**：`bin/aiquota.sh` 用 `trap restore_framework EXIT INT HUP` 保证应用以任何方式退出（正常关闭、崩溃、被 kill）都恢复 framework；`trap "" TERM` 挡住 KUAL 退出时的级联 SIGTERM。二进制内部的 SIGSEGV / SIGABRT handler 保证崩溃时进程立刻退出、让 trap 触发。
+2. **独立看门狗**：`bin/aiquota.sh` 启动应用前先用 `setsid` 拉起 `bin/watchdog.sh`（屏蔽 TERM/INT/HUP 的独立会话）。如果包装脚本本身被 SIGKILL（唯一现实来源是 OOM killer）导致 trap 来不及执行，看门狗发现 `/proc` 里 cvm 仍处于 STOP 状态时会代为恢复 framework。正常退出时它什么都不做（不会把备份的旧画面闪回到已恢复的 framework 上）。
+3. **心跳防卡死**：应用每 30 秒写一次 `/var/tmp/aiquota.ping`；看门狗发现心跳超过 180 秒（最长合法阻塞是约 95 秒的首次 HTTP 请求，留足余量）且连续两次确认后 `kill -9` 应用——进程一死，第 1 层的 trap 立即恢复 framework。应用假死（死循环等）因此也会自愈。
+
+三层之外只剩内核级故障（看门狗和包装脚本同时被 OOM 杀死、进程 D 状态卡死）无法用软件覆盖；此时**长按电源键强制重启即可完全恢复**：framework 是被 SIGSTOP 冻结的，冻结状态不持久，重启后一切如常，且本应用不在系统里留任何开机项，不存在软砖风险。开发调试期间仍建议保持 USBNetwork / SSH 可用。
 
 ## 10. 与 KOReader 插件的关系
 

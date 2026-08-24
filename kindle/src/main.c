@@ -10,6 +10,8 @@
  * and the wrapper script (extension/bin/aiquota.sh) restores the framework. */
 #define _POSIX_C_SOURCE 200809L /* sigaction */
 
+#include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,6 +126,41 @@ static void install_signal_handlers(void)
     sigaction(SIGABRT, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+}
+
+/* Watchdog heartbeat. extension/bin/watchdog.sh kill -9s the app when this
+ * file's mtime goes stale, so a wedged process can never leave the Kindle
+ * framework frozen. The worst legitimate blocking call is the ~95 s HTTP
+ * fetch; beating every 30 s with a 180 s watchdog tolerance leaves margin.
+ * A detached thread (not alarm()) so no signal ever interrupts the evdev or
+ * socket syscalls on the main thread. */
+#define PING_PATH "/var/tmp/aiquota.ping"
+
+static void *heartbeat_main(void *arg)
+{
+    int fd = *(const int *)arg;
+
+    for (;;) {
+        if (write(fd, ".", 1) != 1)
+            break; /* /var/tmp went away: nothing more we can do */
+        sleep(30);
+    }
+    return NULL;
+}
+
+static void start_heartbeat(void)
+{
+    static int ping_fd; /* static: the thread reads it after the call returns */
+    pthread_t tid;
+
+    ping_fd = open(PING_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (ping_fd < 0)
+        return; /* non-fatal: the watchdog just never sees a file */
+    if (pthread_create(&tid, NULL, heartbeat_main, &ping_fd) != 0) {
+        close(ping_fd);
+        return;
+    }
+    pthread_detach(tid);
 }
 
 static void usage(const char *prog)
@@ -512,6 +549,8 @@ int main(int argc, char **argv)
         rc = 1;
         goto out;
     }
+
+    start_heartbeat(); /* every interactive mode; the wrapper's watchdog reads it */
 
     if (mode == MODE_CALIBRATE) {
         rc = run_calibrate(fbfd, scr_w, scr_h, input_fd);

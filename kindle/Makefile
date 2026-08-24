@@ -5,7 +5,7 @@ CROSS    ?= arm-kindlepw2-linux-gnueabi-
 CC       := $(CROSS)gcc
 CFLAGS   := -std=c99 -Os -ffunction-sections -fdata-sections -Wall -Wextra -D_BSD_SOURCE -D_SVID_SOURCE -Isrc -Ithird_party/cJSON -Ithird_party/fbink
 LDFLAGS  := -Wl,--gc-sections
-LIBS     := third_party/fbink/libfbink.a -lm
+LIBS     := third_party/fbink/libfbink.a -lm -lpthread
 SRCS     := $(wildcard src/*.c) third_party/cJSON/cJSON.c
 BIN      := extension/bin/aiquota
 
