@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<extension>
+	<information>
+		<name>AI Quota</name>
+		<version>1.0</version>
+		<id>aiquota</id>
+	</information>
+	<menus>
+		<menu type="json" location="menu.json"/>
+	</menus>
+</extension>

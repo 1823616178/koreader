@@ -1,1 +1,7 @@
 *.log
+dist/
+kindle/extension/bin/aiquota
+kindle/extension/bin/NotoSansSC-subset.ttf
+kindle/fonts/NotoSansSC.ttf
+kindle/fonts/NotoSansSC-subset.ttf
+kindle/fonts/glyphs.txt

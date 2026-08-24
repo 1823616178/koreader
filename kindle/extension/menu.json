@@ -1,0 +1,10 @@
+{
+	"name": "AI Quota",
+	"items": [
+		{
+			"name": "AI 额度",
+			"action": "sh /mnt/us/extensions/aiquota/bin/aiquota.sh",
+			"exit": true
+		}
+	]
+}
