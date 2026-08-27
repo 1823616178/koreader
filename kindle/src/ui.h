@@ -15,9 +15,11 @@ void ui_destroy(Ui *ui);
 
 /* Full dashboard redraw (everything drawn with no_refresh); caller issues one fbink_refresh_rect.
  * host: title-bar subtitle (may be NULL -> "未配置").
- * status_state: "连接中" | "失败" | "已连接"; status_detail: url or error text; loading: 0/1. */
+ * status_state: "连接中" | "失败" | "已连接"; status_detail: url or error text; loading: 0/1.
+ * wifi_state: 1 connected (dark dot), 0 off (gray dot), -1 unknown (no badge). */
 void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
-                       const char *status_state, const char *status_detail, int loading);
+                       const char *status_state, const char *status_detail, int loading,
+                       int wifi_state);
 
 /* Hit-test the bottom button row (screen-space tap coords). Disabled buttons return UI_ACTION_NONE. */
 UiAction ui_hit_button(const Ui *ui, int x, int y);

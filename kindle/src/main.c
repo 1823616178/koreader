@@ -146,21 +146,42 @@ static void install_signal_handlers(void)
     install_fatal_handler(SIGTERM, &sa);
 }
 
+/* Upper bound of one poll segment when the idle timer is off (0): the
+ * heartbeat contract forbids unbounded announcements, so "wait forever" is
+ * built from bounded segments with the watchdog re-armed before each one.
+ * Segment length trades wedge-detection latency against a tiny gesture risk:
+ * a touch whose down and up straddle a segment boundary is dropped (state
+ * self-recovers on the next touch). 5 min puts worst-case wedged-app
+ * detection at ~7 min here while the straddle odds are ~1 in 50 000 taps. */
+#define TAP_WAIT_CHUNK_S 300
+
 /* One tap wait, wrapped in the heartbeat contract (see watchdog.h): announce
  * the whole idle budget before blocking, then drop back to the short local-
  * work bound. With this, the app has no unbounded wait left anywhere, which
  * is what lets watchdog.sh read a missing beat as "wedged" rather than "the
  * user put the Kindle down".
+ * timeout_s <= 0 means unlimited (idle timer off): polls in TAP_WAIT_CHUNK_S
+ * segments forever, so rc==1 never escapes -- only taps or device errors do.
  * Returns 0 tap / 1 timeout / -1 device error, like input_wait_tap. */
 static int wait_tap_for(int fd, int scr_w, int scr_h, const AppConfig *cfg,
                         int timeout_s, int *x, int *y)
 {
     int rc;
 
-    wd_expect(timeout_s + WD_SLACK_S);
-    rc = input_wait_tap(fd, scr_w, scr_h, cfg, timeout_s, x, y);
-    wd_expect(WD_STEP_S);
-    return rc;
+    if (timeout_s > 0) {
+        wd_expect(timeout_s + WD_SLACK_S);
+        rc = input_wait_tap(fd, scr_w, scr_h, cfg, timeout_s, x, y);
+        wd_expect(WD_STEP_S);
+        return rc;
+    }
+
+    for (;;) {
+        wd_expect(TAP_WAIT_CHUNK_S + WD_SLACK_S);
+        rc = input_wait_tap(fd, scr_w, scr_h, cfg, TAP_WAIT_CHUNK_S, x, y);
+        wd_expect(WD_STEP_S);
+        if (rc != 1)
+            return rc; /* tap or device error; chunk expiry just re-arms */
+    }
 }
 
 static void usage(const char *prog)
@@ -214,7 +235,7 @@ static void paint_loading(int fbfd, Ui *ui, const char *host, const char *api_ur
     QuotaSnapshot empty;
 
     quota_empty_snapshot(&empty);
-    ui_draw_dashboard(ui, &empty, host, "连接中", api_url, 1);
+    ui_draw_dashboard(ui, &empty, host, "连接中", api_url, 1, net_wifi_state());
     full_refresh(fbfd);
 }
 
@@ -277,7 +298,7 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
     if (st == ST_ERROR && !*have_good)
         quota_empty_snapshot(snap);
     ui_draw_dashboard(ui, snap, host, st == ST_ERROR ? "失败" : "已连接",
-                      detail, 0);
+                      detail, 0, net_wifi_state());
     full_refresh(fbfd);
     return st;
 }
@@ -585,7 +606,8 @@ int main(int argc, char **argv)
             have_good = 1;
         }
         snprintf(detail, sizeof(detail), "demo");
-        ui_draw_dashboard(ui, &snap, host, "已连接", detail, 0);
+        ui_draw_dashboard(ui, &snap, host, "已连接", detail, 0,
+                          net_wifi_state());
         full_refresh(fbfd);
         if (input_fd < 0) {
             rc = 0; /* rendered; nothing to interact with */
@@ -611,9 +633,10 @@ int main(int argc, char **argv)
         }
 
         /* READY/ERROR: wait for a tap on the button row. The poll bound is
-         * whichever comes first -- the idle deadline or the next auto-refresh.
-         * Taps made while a blocking fetch runs stay queued in the kernel
-         * evdev buffer and are hit-tested here against the NEW screen. */
+         * whichever comes first -- the idle deadline (0 = unlimited) or the
+         * next auto-refresh. Taps made while a blocking fetch runs stay
+         * queued in the kernel evdev buffer and are hit-tested here against
+         * the NEW screen. */
         wait_s = cfg.idle_timeout_s;
         if (cfg.auto_refresh_min > 0) {
             long until = last_fetch + (long)cfg.auto_refresh_min * 60 -
@@ -623,18 +646,20 @@ int main(int argc, char **argv)
                 st = ST_LOADING;
                 continue;
             }
-            if (until < wait_s)
+            if (wait_s <= 0 || until < wait_s)
                 wait_s = (int)until;
         }
 
         wr = wait_tap_for(input_fd, scr_w, scr_h, &cfg, wait_s, &x, &y);
         if (wr > 0) {
-            /* Timeout. The clock decides which deadline fired: an overdue
-             * auto-refresh loops back into a fetch; anything else is real
-             * idleness. An auto-refresh never feeds the idle timer, so a
-             * Kindle put face-up still closes the app on schedule. */
-            if (cfg.auto_refresh_min > 0 &&
-                time(NULL) >= last_fetch + (long)cfg.auto_refresh_min * 60)
+            /* Timeout. With auto-refresh on, let the loop top decide: it
+             * turns an overdue refresh into a fetch and otherwise waits
+             * again (poll can wake a hair early; re-checking the clock
+             * there avoids closing on a rounding artifact). An auto-refresh
+             * never feeds the idle timer, so with a finite idle timeout a
+             * Kindle put face-up still closes the app on schedule; with
+             * idle off, only 关闭 ends the session here. */
+            if (cfg.auto_refresh_min > 0)
                 continue;
             break; /* idle: close ourselves so the framework comes back */
         }
@@ -712,7 +737,7 @@ int main(int argc, char **argv)
                     } else {
                         snprintf(edit, sizeof(edit), "%d",
                                  settings_idle_s(sp));
-                        keypad_draw(kp, "自动退出(秒)", edit);
+                        keypad_draw(kp, "自动退出(0=无限)", edit);
                     }
                     full_refresh(fbfd);
 
@@ -765,7 +790,7 @@ int main(int argc, char **argv)
             } else {
                 ui_draw_dashboard(ui, &snap, host,
                                   st == ST_ERROR ? "失败" : "已连接",
-                                  detail, 0);
+                                  detail, 0, net_wifi_state());
                 full_refresh(fbfd);
             }
         }

@@ -31,7 +31,7 @@ void config_defaults(AppConfig *cfg)
 int config_clamp_idle_timeout(int secs)
 {
     if (secs <= 0)
-        return CONFIG_IDLE_TIMEOUT_DEFAULT;
+        return 0; /* 0 = unlimited: the idle timer is off */
     if (secs < CONFIG_IDLE_TIMEOUT_MIN)
         return CONFIG_IDLE_TIMEOUT_MIN;
     if (secs > CONFIG_IDLE_TIMEOUT_MAX)

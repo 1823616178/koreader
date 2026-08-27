@@ -22,6 +22,12 @@
  * loop's own budget counts only its sleeps, not the probes in between. */
 #define NET_CMD_S 30
 
+/* Last state wifi_probe actually observed: 1 CONNECTED, 0 not connected,
+ * -1 never probed (or only failed probes so far). Feeds the dashboard's
+ * WiFi badge; a failed probe keeps the previous value rather than
+ * downgrading known-good state to "unknown". */
+static int g_wifi_state = -1;
+
 /* Probe wifid state through lipc. Returns 1 when cmState is CONNECTED,
  * 0 when lipc answered something else, -1 when there was no usable
  * output (lipc missing or broken). */
@@ -43,6 +49,8 @@ static int wifi_probe(void)
         result = (strcmp(buf, "CONNECTED") == 0) ? 1 : 0;
     }
     pclose(p);
+    if (result >= 0)
+        g_wifi_state = result; /* a failed probe leaves the last known value */
     return result;
 }
 
@@ -51,6 +59,11 @@ static int wifi_probe(void)
  * net_release_wifi() or whenever a probe shows the connection predates us. */
 static int g_wifi_we_enabled;
 
+int net_wifi_state(void)
+{
+    return g_wifi_state;
+}
+
 void net_release_wifi(void)
 {
     int rc;
@@ -58,6 +71,7 @@ void net_release_wifi(void)
     if (!g_wifi_we_enabled)
         return; /* nothing raised by us: a pre-existing connection stays up */
     g_wifi_we_enabled = 0; /* clear first: release stays idempotent even if lipc fails */
+    g_wifi_state = 0;      /* we just asked for the radio to go down */
     wd_expect(NET_CMD_S);
     rc = system("lipc-set-prop -i com.lab126.cmd wirelessEnable 0 2>/dev/null");
     (void)rc;

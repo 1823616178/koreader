@@ -15,4 +15,9 @@
 int  net_ensure_wifi(void);
 void net_release_wifi(void);
 
+/* Last radio state actually observed by the probes: 1 CONNECTED, 0 not
+ * connected, -1 never probed. Zero-cost (cached); refreshed on every
+ * ensure/release cycle, so it is exactly as fresh as the last fetch. */
+int  net_wifi_state(void);
+
 #endif

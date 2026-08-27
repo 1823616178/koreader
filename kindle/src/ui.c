@@ -332,6 +332,31 @@ static void draw_info_card(const Ui *ui, int x, int y, const QuotaSnapshot *snap
     draw_info_block(ui, ix, iy, "显示", mode, generated);
 }
 
+/* WiFi badge, top-right of the title bar: a small state dot + "WiFi" label.
+ * Dark dot = radio connected; gray dot = off (the usual sight with
+ * wifi_auto_off on -- the fetch is over, the radio went back to sleep).
+ * state < 0 draws nothing: before the first probe there is nothing to say. */
+static void draw_wifi_badge(const Ui *ui, int state)
+{
+    const char *label = "WiFi";
+    const int dot = ui_scale(ui, 6);
+    const int gap = ui_scale(ui, 5);
+    int tw = 0, th = 0;
+    int x, y;
+
+    if (state < 0)
+        return;
+    if (ui_measure(ui, label, ui->px_detail, &tw, &th) != 0 || tw <= 0)
+        return;
+
+    x = ui->w - ui->h_padding - tw - gap - dot;
+    y = ui_scale(ui, 18);
+    ui_fill(ui, x, y + (th - dot) / 2, dot, dot,
+            state > 0 ? UI_INK_BLACK : UI_INK_GRAY);
+    ui_text(ui, label, ui->px_detail, x + dot + gap, y, tw, th,
+            UI_ALIGN_LEFT, state > 0 ? FG_BLACK : FG_GRAY8, 0);
+}
+
 /* TitleBar port (quotapage.lua:257-287): centered title + subtitle, then a 1px
  * black hairline across the full width. No close icon (the 关闭 button covers
  * it; the subset font has no X glyph). */
@@ -470,7 +495,8 @@ void ui_destroy(Ui *ui)
 }
 
 void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
-                       const char *status_state, const char *status_detail, int loading)
+                       const char *status_state, const char *status_detail, int loading,
+                       int wifi_state)
 {
     int x0, x1, y0, dy;
 
@@ -480,6 +506,7 @@ void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
     fbink_cls(ui->fbfd, &ui->cfg_draw, NULL, false); /* white canvas, no refresh */
 
     draw_title_bar(ui, host);
+    draw_wifi_badge(ui, wifi_state);
 
     x0 = ui->h_padding;
     x1 = ui->h_padding + ui->card_w + ui->card_gap;

@@ -68,8 +68,11 @@ static void refresh_values(Settings *s)
                  s->work.auto_refresh_min);
     else
         snprintf(s->val_text[ROW_REFRESH], sizeof(s->val_text[0]), "%s", "关闭");
-    snprintf(s->val_text[ROW_IDLE], sizeof(s->val_text[0]), "%d 秒",
-             s->work.idle_timeout_s);
+    if (s->work.idle_timeout_s > 0)
+        snprintf(s->val_text[ROW_IDLE], sizeof(s->val_text[0]), "%d 秒",
+                 s->work.idle_timeout_s);
+    else
+        snprintf(s->val_text[ROW_IDLE], sizeof(s->val_text[0]), "%s", "无限");
 }
 
 Settings *settings_create(Ui *ui, const AppConfig *cfg)

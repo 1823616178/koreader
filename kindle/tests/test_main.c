@@ -180,10 +180,10 @@ static void test_config_roundtrip(void)
     CHECK(back.wifi_auto_off == 0);
     CHECK(back.auto_refresh_min == 15);
 
-    /* Idle timeout is clamped, never disabled: an unbounded wait would leave
-     * the framework frozen with nothing left to time it out. */
-    CHECK(config_clamp_idle_timeout(0) == CONFIG_IDLE_TIMEOUT_DEFAULT);
-    CHECK(config_clamp_idle_timeout(-5) == CONFIG_IDLE_TIMEOUT_DEFAULT);
+    /* Idle timeout: [MIN, MAX]; non-positive disables it entirely -- the app
+     * then only leaves via 关闭, so this is an explicit power trade-off. */
+    CHECK(config_clamp_idle_timeout(0) == 0);
+    CHECK(config_clamp_idle_timeout(-5) == 0);
     CHECK(config_clamp_idle_timeout(1) == CONFIG_IDLE_TIMEOUT_MIN);
     CHECK(config_clamp_idle_timeout(999999) == CONFIG_IDLE_TIMEOUT_MAX);
     CHECK(config_clamp_idle_timeout(120) == 120);
@@ -212,16 +212,26 @@ static void test_config_roundtrip(void)
         CHECK(back.auto_refresh_min == CONFIG_AUTO_REFRESH_MAX);
     }
 
-    /* wifi_auto_off=0 in text parses as off even with junk values. */
+    /* wifi_auto_off=0 in text parses as off even with junk values; idle 0
+     * (and junk, same atoi result) means the idle timer is off entirely. */
     f = fopen(path, "w");
     CHECK(f != NULL);
     if (f) {
-        fputs("wifi_auto_off=abc\nauto_refresh_min=-3\n", f);
+        fputs("wifi_auto_off=abc\nauto_refresh_min=-3\nidle_timeout_s=abc\n", f);
         fclose(f);
         config_defaults(&back);
         CHECK(config_load(&back, path) == 0);
         CHECK(back.wifi_auto_off == 0); /* atoi("abc")==0 -> false -> 0 */
         CHECK(back.auto_refresh_min == 0);
+        CHECK(back.idle_timeout_s == 0);
+
+        /* Unlimited roundtrips: saved 0 loads back as 0. */
+        cfg.idle_timeout_s = config_clamp_idle_timeout(0);
+        CHECK(cfg.idle_timeout_s == 0);
+        CHECK(config_save(&cfg, path) == 0);
+        config_defaults(&back);
+        CHECK(config_load(&back, path) == 0);
+        CHECK(back.idle_timeout_s == 0);
     }
 }
 

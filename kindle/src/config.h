@@ -7,8 +7,12 @@
 #define CONFIG_PATH "/mnt/us/extensions/aiquota/config"
 
 /* Idle auto-exit: no tap for this long closes the app, which is what releases
- * the SIGSTOPped framework. Clamped, never disabled -- an unbounded wait is
- * exactly the state the watchdog design refuses to allow. */
+ * the SIGSTOPped framework. 0 disables the timer entirely -- the app then
+ * leaves only via 关闭 (or the watchdog layers). Mind the power angle: with
+ * preventScreenSaver held and the framework frozen, the Kindle will not
+ * suspend while the app sits open, so unlimited costs real battery. A missing
+ * key keeps the default; any non-positive value in the file means disabled
+ * (atoi cannot tell "0" from garbage, so both map to off). */
 #define CONFIG_IDLE_TIMEOUT_DEFAULT 600
 #define CONFIG_IDLE_TIMEOUT_MIN 60
 #define CONFIG_IDLE_TIMEOUT_MAX 3600
@@ -42,7 +46,7 @@ int  config_save(const AppConfig *cfg, const char *path);
 /* Port of quotadata.lua normalizeUrl (lines 49-62): trim -> default if empty ->
  * add http:// if no scheme -> strip trailing '/' -> append /api/usage if missing. */
 void config_normalize_url(char *dst, size_t dst_size, const char *src);
-/* Clamp into [CONFIG_IDLE_TIMEOUT_MIN, CONFIG_IDLE_TIMEOUT_MAX]; <= 0 -> default. */
+/* Clamp into [CONFIG_IDLE_TIMEOUT_MIN, CONFIG_IDLE_TIMEOUT_MAX]; <= 0 -> 0 (unlimited). */
 int  config_clamp_idle_timeout(int secs);
 /* Clamp into [1, CONFIG_AUTO_REFRESH_MAX]; <= 0 -> 0 (off). */
 int  config_clamp_auto_refresh(int mins);
