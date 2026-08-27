@@ -78,12 +78,18 @@ static int match_ts(const char *s, int with_seconds)
     return 1;
 }
 
-/* Full example JSON from usage-api.md (lines 60-122). */
+/* Full example JSON from docs/superpowers/plans/usage-api.md. */
 static const char *EXAMPLE_JSON =
     "{\n"
-    "  \"displayMode\": \"used\",\n"
+    "  \"displayMode\": \"remaining\",\n"
     "  \"alertPercent\": 85,\n"
     "  \"generatedAt\": 1785695952333,\n"
+    "  \"grok\": {\n"
+    "    \"fetchedAt\": 1785695890000,\n"
+    "    \"five\": null,\n"
+    "    \"seven\": { \"used\": 8, \"resetAt\": 1788408060000 },\n"
+    "    \"monthly\": null\n"
+    "  },\n"
     "  \"claude\": {\n"
     "    \"fetchedAt\": 1785695900000,\n"
     "    \"five\": { \"used\": 18, \"resetAt\": 1785712676000 },\n"
@@ -98,6 +104,14 @@ static const char *EXAMPLE_JSON =
     "    \"fetchedAt\": 1785695950844,\n"
     "    \"five\": { \"used\": 2, \"resetAt\": 1785709259452 },\n"
     "    \"seven\": { \"used\": 25, \"resetAt\": 1786000859452 }\n"
+    "  },\n"
+    "  \"opencode\": {\n"
+    "    \"fetchedAt\": 1785695951200,\n"
+    "    \"rolling\": { \"used\": 1, \"resetAt\": 1785712676000, \"status\": \"ok\" },\n"
+    "    \"weekly\": { \"used\": 46, \"resetAt\": 1786000859452, \"status\": \"ok\" },\n"
+    "    \"monthly\": { \"used\": 23, \"resetAt\": 1788134400000, \"status\": \"ok\" },\n"
+    "    \"five\": { \"used\": 1, \"resetAt\": 1785712676000, \"status\": \"ok\" },\n"
+    "    \"seven\": { \"used\": 46, \"resetAt\": 1786000859452, \"status\": \"ok\" }\n"
     "  },\n"
     "  \"agy\": {\n"
     "    \"fetchedAt\": 1785695952333,\n"
@@ -241,11 +255,19 @@ static void test_parse_full_example(void)
 
     CHECK(quota_parse_snapshot(EXAMPLE_JSON, &snap) == 0);
 
-    CHECK(strcmp(snap.display_mode, "used") == 0);
+    CHECK(strcmp(snap.display_mode, "remaining") == 0);
     CHECK(dbl_eq(snap.alert_percent, 85.0));
     CHECK(snap.has_generated_at == 1);
     CHECK(snap.generated_at == 1785695952333LL);
 
+    CHECK(snap.grok.has_fetched_at == 1);
+    CHECK(snap.grok.fetched_at == 1785695890000LL);
+    CHECK(snap.grok.five.valid == 0);
+    CHECK(snap.grok.seven.valid == 1 && dbl_eq(snap.grok.seven.used, 8.0));
+    CHECK(snap.grok.monthly.valid == 0);
+
+    CHECK(snap.claude.has_fetched_at == 1);
+    CHECK(snap.claude.fetched_at == 1785695900000LL);
     CHECK(snap.claude.five.valid == 1);
     CHECK(dbl_eq(snap.claude.five.used, 18.0));
     CHECK(snap.claude.five.has_reset_at == 1);
@@ -260,6 +282,16 @@ static void test_parse_full_example(void)
     CHECK(snap.kimi.five.reset_at == 1785709259452LL);
     CHECK(snap.kimi.seven.valid == 1 && dbl_eq(snap.kimi.seven.used, 25.0));
 
+    CHECK(snap.opencode.has_fetched_at == 1);
+    CHECK(snap.opencode.fetched_at == 1785695951200LL);
+    CHECK(snap.opencode.five.valid == 1 && dbl_eq(snap.opencode.five.used, 1.0));
+    CHECK(snap.opencode.seven.valid == 1 && dbl_eq(snap.opencode.seven.used, 46.0));
+    CHECK(snap.opencode.monthly.valid == 1 && dbl_eq(snap.opencode.monthly.used, 23.0));
+    CHECK(snap.opencode.monthly.rate_limited == 0);
+
+    CHECK(snap.agy.has_fetched_at == 1);
+    CHECK(snap.agy.fetched_at == 1785695952333LL);
+    CHECK(snap.agy.gemini.has_fetched_at == 1);
     CHECK(snap.agy.gemini.five.valid == 1 && dbl_eq(snap.agy.gemini.five.used, 0.67791));
     CHECK(snap.agy.gemini.seven.valid == 1 && dbl_eq(snap.agy.gemini.seven.used, 0.135493));
     CHECK(snap.agy.gemini.seven.reset_at == 1785835207000LL);
@@ -270,6 +302,36 @@ static void test_parse_full_example(void)
     CHECK(snap.agy.third_party.five.reset_at == 1785713952000LL);
     CHECK(snap.agy.third_party.seven.valid == 1);
     CHECK(dbl_eq(snap.agy.third_party.seven.used, 0.0));
+}
+
+static void test_parse_opencode_names_and_status(void)
+{
+    QuotaSnapshot snap;
+
+    /* Canonical fields win over compatibility aliases, including a canonical
+     * null. A rate-limited window remains valid and preserves its status. */
+    const char *canonical =
+        "{ \"opencode\": {"
+        " \"rolling\": null,"
+        " \"weekly\": { \"used\": 100, \"status\": \"rate-limited\" },"
+        " \"monthly\": { \"used\": 23, \"status\": \"ok\" },"
+        " \"five\": { \"used\": 12 },"
+        " \"seven\": { \"used\": 34 } } }";
+
+    CHECK(quota_parse_snapshot(canonical, &snap) == 0);
+    CHECK(snap.opencode.five.valid == 0);
+    CHECK(snap.opencode.seven.valid == 1);
+    CHECK(dbl_eq(snap.opencode.seven.used, 100.0));
+    CHECK(snap.opencode.seven.rate_limited == 1);
+    CHECK(snap.opencode.monthly.valid == 1);
+    CHECK(snap.opencode.monthly.rate_limited == 0);
+
+    /* Older/partial payloads with aliases only remain readable. */
+    CHECK(quota_parse_snapshot(
+        "{ \"opencode\": { \"five\": { \"used\": 7 },"
+        " \"seven\": { \"used\": 9 } } }", &snap) == 0);
+    CHECK(snap.opencode.five.valid == 1 && dbl_eq(snap.opencode.five.used, 7.0));
+    CHECK(snap.opencode.seven.valid == 1 && dbl_eq(snap.opencode.seven.used, 9.0));
 }
 
 static void test_parse_kimi_null(void)
@@ -295,6 +357,7 @@ static void test_parse_kimi_null(void)
     CHECK(snap.agy.third_party.five.valid == 1 && dbl_eq(snap.agy.third_party.five.used, 0.0));
     CHECK(snap.alert_percent == 85.0); /* missing -> default 85 */
     CHECK(snap.has_generated_at == 0);
+    CHECK(strcmp(snap.display_mode, "remaining") == 0); /* missing -> API default */
 }
 
 static void test_parse_remaining_mode(void)
@@ -740,6 +803,7 @@ int main(void)
     RUN(test_normalize_url);
     RUN(test_config_roundtrip);
     RUN(test_parse_full_example);
+    RUN(test_parse_opencode_names_and_status);
     RUN(test_parse_kimi_null);
     RUN(test_parse_remaining_mode);
     RUN(test_parse_garbage);

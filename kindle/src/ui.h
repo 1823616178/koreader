@@ -48,7 +48,7 @@ struct Ui {
     int dpi;
     FBInkConfig cfg_draw;   /* batch drawing config: no_refresh, black on white */
     /* scaled metrics, quotapage.lua:45-51 with scaleBySize -> ui_scale */
-    int h_padding, card_gap, card_padding, border, line_h;
+    int h_padding, card_gap, row_gap, card_padding, border, line_h;
     int gap2, gap3, gap5, bar_h, title_h, button_h;
     int wb_h;   /* window block height: value line + bar + gap3 + detail line */
     int content_w, card_w, card_inner, card_h, content_h, body_y;

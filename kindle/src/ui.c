@@ -240,7 +240,7 @@ static void draw_window_block(const Ui *ui, int x, int y, const char *label,
                               const QuotaWindow *win, const QuotaSnapshot *snap)
 {
     char value_text[32];
-    char detail[64];
+    char detail[96];
     double value = 0.0;
     int dy = y + ui->line_h;
 
@@ -250,7 +250,13 @@ static void draw_window_block(const Ui *ui, int x, int y, const char *label,
 
         value = quota_display_value(win, snap->display_mode);
         quota_format_percent(value_text, sizeof(value_text), value);
-        quota_format_reset(detail, sizeof(detail), win, now_ms);
+        if (win->rate_limited) {
+            char reset[64];
+            quota_format_reset(reset, sizeof(reset), win, now_ms);
+            snprintf(detail, sizeof(detail), "已限流 · %s", reset);
+        } else {
+            quota_format_reset(detail, sizeof(detail), win, now_ms);
+        }
         /* Alert marker: raw used percent vs alertPercent, not the display value. */
         if (win->used >= snap->alert_percent) {
             vl = strlen(value_text);
@@ -272,11 +278,18 @@ static void draw_window_block(const Ui *ui, int x, int y, const char *label,
             UI_ALIGN_RIGHT, FG_BLACK, 0);
 }
 
-/* buildCard port (quotapage.lua:130-156). */
+static void draw_info_block(const Ui *ui, int x, int y, const char *label,
+                            const char *value, const char *detail);
+
+/* Provider card. Grok/OpenCode use the third block for monthly quota; the
+ * other providers use it for their collection timestamp, keeping all eight
+ * cards the same height and the grid stable while data changes. */
 static void draw_provider_card(const Ui *ui, int x, int y, const char *title,
-                               const ProviderQuota *pq, const QuotaSnapshot *snap)
+                               const ProviderQuota *pq, const QuotaSnapshot *snap,
+                               const char *five_label, const char *monthly_label)
 {
     const char *mode = strcmp(snap->display_mode, "remaining") == 0 ? "剩余" : "已用";
+    char fetched[24];
     int ix = x + ui->border + ui->card_padding;
     int iy = y + ui->border + ui->card_padding;
     int title_w = (int)(ui->card_inner * 0.72);
@@ -288,9 +301,17 @@ static void draw_provider_card(const Ui *ui, int x, int y, const char *title,
     ui_text(ui, mode, ui->px_detail, ix + title_w, iy, ui->card_inner - title_w,
             ui->line_h, UI_ALIGN_RIGHT, FG_BLACK, 0);
     iy += ui->line_h + ui->gap5;
-    draw_window_block(ui, ix, iy, "5 小时", &pq->five, snap);
+    draw_window_block(ui, ix, iy, five_label, &pq->five, snap);
     iy += ui->wb_h + ui->gap5;
     draw_window_block(ui, ix, iy, "周额度", &pq->seven, snap);
+    iy += ui->wb_h + ui->gap5;
+    if (monthly_label) {
+        draw_window_block(ui, ix, iy, monthly_label, &pq->monthly, snap);
+    } else {
+        quota_format_timestamp(fetched, sizeof(fetched),
+                               pq->has_fetched_at, pq->fetched_at);
+        draw_info_block(ui, ix, iy, "采集", fetched, "提供商快照");
+    }
 }
 
 /* buildInfoBlock port (quotapage.lua:158-171): value line, full-width
@@ -429,9 +450,41 @@ static void draw_buttons(Ui *ui, int y, int loading)
     ui->btn_row_drawn = 1;
 }
 
+static int scaled_metric(const Ui *ui, int logical, int percent, int minimum)
+{
+    int value = (ui_scale(ui, logical) * percent + 50) / 100;
+    return value < minimum ? minimum : value;
+}
+
+/* Calculate the vertical metrics at a percentage of the normal KOReader-like
+ * scale. Four rows fit unmodified on the target 1072x1448 devices. Older
+ * 600x800 Kindles automatically use a denser but still complete layout. */
+static void configure_vertical_metrics(Ui *ui, int percent)
+{
+    ui->row_gap = scaled_metric(ui, 8, percent, 2);
+    ui->card_padding = scaled_metric(ui, 9, percent, 3);
+    ui->line_h = scaled_metric(ui, 27, percent, 13);
+    ui->gap3 = scaled_metric(ui, 3, percent, 1);
+    ui->gap5 = scaled_metric(ui, 5, percent, 1);
+    ui->bar_h = scaled_metric(ui, 8, percent, 3);
+    ui->button_h = scaled_metric(ui, 48, percent, 24);
+
+    ui->px_card_title = scaled_metric(ui, 19, percent, 10);
+    ui->px_label = scaled_metric(ui, 14, percent, 8);
+    ui->px_percent = scaled_metric(ui, 16, percent, 9);
+    ui->px_detail = scaled_metric(ui, 12, percent, 7);
+
+    ui->card_inner = ui->card_w - 2 * (ui->card_padding + ui->border);
+    ui->wb_h = ui->line_h + ui->bar_h + ui->gap3 + ui->line_h;
+    ui->card_h = 2 * (ui->card_padding + ui->border) + ui->line_h +
+                 3 * ui->gap5 + 3 * ui->wb_h;
+    ui->content_h = 4 * ui->card_h + 4 * ui->row_gap + ui->button_h;
+}
+
 Ui *ui_create(int fbfd, int screen_w, int screen_h, int dpi, const char *font_path)
 {
     Ui *ui = calloc(1, sizeof(*ui));
+    int fit_percent;
 
     if (!ui)
         return NULL;
@@ -447,35 +500,22 @@ Ui *ui_create(int fbfd, int screen_w, int screen_h, int dpi, const char *font_pa
 
     ui->h_padding = ui_scale(ui, 16);
     ui->card_gap = ui_scale(ui, 8);
-    ui->card_padding = ui_scale(ui, 9);
     ui->border = ui_scale(ui, 1);
     if (ui->border < 1)
         ui->border = 1;
-    ui->line_h = ui_scale(ui, 27);
     ui->gap2 = ui_scale(ui, 2);
-    ui->gap3 = ui_scale(ui, 3);
-    ui->gap5 = ui_scale(ui, 5);
-    ui->bar_h = ui_scale(ui, 8);
     ui->title_h = ui_scale(ui, 64);
-    ui->button_h = ui_scale(ui, 48);
 
     ui->content_w = screen_w - 2 * ui->h_padding;
     ui->card_w = (ui->content_w - ui->card_gap) / 2;
-    ui->card_inner = ui->card_w - 2 * (ui->card_padding + ui->border);
-
-    ui->px_card_title = ui_scale(ui, 19);
-    ui->px_label = ui_scale(ui, 14);
-    ui->px_percent = ui_scale(ui, 16);
-    ui->px_detail = ui_scale(ui, 12);
     ui->px_title = ui_scale(ui, 22);
     ui->px_subtitle = ui_scale(ui, 14);
 
-    /* Window blocks (buildWindow) and info blocks (buildInfoBlock) share the
-     * same height: line + S(8) + S(3) + line, so all six cards are equal. */
-    ui->wb_h = ui->line_h + ui->bar_h + ui->gap3 + ui->line_h;
-    ui->card_h = 2 * (ui->card_padding + ui->border) +
-                 ui->line_h + ui->gap5 + ui->wb_h + ui->gap5 + ui->wb_h;
-    ui->content_h = 3 * ui->card_h + 3 * ui->card_gap + ui->button_h;
+    for (fit_percent = 100; fit_percent >= 55; fit_percent--) {
+        configure_vertical_metrics(ui, fit_percent);
+        if (ui->content_h <= screen_h - ui->title_h)
+            break;
+    }
     {
         /* CenterContainer semantics: content centered below the title bar. */
         int slack = screen_h - ui->title_h - ui->content_h;
@@ -513,14 +553,25 @@ void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
     y0 = ui->body_y;
     dy = ui->card_h + ui->card_gap;
 
-    draw_provider_card(ui, x0, y0, "Claude Code", &snap->claude, snap);
-    draw_provider_card(ui, x1, y0, "Codex", &snap->codex, snap);
-    draw_provider_card(ui, x0, y0 + dy, "Kimi Code", &snap->kimi, snap);
-    draw_provider_card(ui, x1, y0 + dy, "AGY · Gemini", &snap->agy.gemini, snap);
-    draw_provider_card(ui, x0, y0 + 2 * dy, "AGY · Claude/GPT", &snap->agy.third_party, snap);
-    draw_info_card(ui, x1, y0 + 2 * dy, snap, status_state, status_detail);
+    dy = ui->card_h + ui->row_gap;
 
-    draw_buttons(ui, y0 + 3 * ui->card_h + 3 * ui->card_gap, loading);
+    draw_provider_card(ui, x0, y0, "Grok", &snap->grok, snap,
+                       "5 小时", "月额度");
+    draw_provider_card(ui, x1, y0, "Claude Code", &snap->claude, snap,
+                       "5 小时", NULL);
+    draw_provider_card(ui, x0, y0 + dy, "Codex", &snap->codex, snap,
+                       "5 小时", NULL);
+    draw_provider_card(ui, x1, y0 + dy, "Kimi Code", &snap->kimi, snap,
+                       "5 小时", NULL);
+    draw_provider_card(ui, x0, y0 + 2 * dy, "OpenCode Go", &snap->opencode, snap,
+                       "滚动 5h", "月额度");
+    draw_provider_card(ui, x1, y0 + 2 * dy, "AGY · Gemini", &snap->agy.gemini, snap,
+                       "5 小时", NULL);
+    draw_provider_card(ui, x0, y0 + 3 * dy, "AGY · Claude/GPT",
+                       &snap->agy.third_party, snap, "5 小时", NULL);
+    draw_info_card(ui, x1, y0 + 3 * dy, snap, status_state, status_detail);
+
+    draw_buttons(ui, y0 + 4 * ui->card_h + 4 * ui->row_gap, loading);
 }
 
 UiAction ui_hit_button(const Ui *ui, int x, int y)

@@ -8,11 +8,15 @@ typedef struct {
     double used;          /* clamped 0..100, always "used percent" semantics */
     int has_reset_at;
     long long reset_at;   /* unix epoch ms */
+    int rate_limited;     /* status == "rate-limited" (currently OpenCode only) */
 } QuotaWindow;
 
 typedef struct {
+    int has_fetched_at;
+    long long fetched_at; /* unix epoch ms */
     QuotaWindow five;
     QuotaWindow seven;
+    QuotaWindow monthly;  /* Grok/OpenCode; invalid for providers without it */
 } ProviderQuota;
 
 typedef struct {
@@ -20,8 +24,12 @@ typedef struct {
     double alert_percent;         /* clamped, default 85 */
     int has_generated_at;
     long long generated_at;       /* unix epoch ms */
-    ProviderQuota claude, codex, kimi;
-    struct { ProviderQuota gemini, third_party; } agy;
+    ProviderQuota grok, claude, codex, kimi, opencode;
+    struct {
+        int has_fetched_at;
+        long long fetched_at;
+        ProviderQuota gemini, third_party;
+    } agy;
 } QuotaSnapshot;
 
 void quota_empty_snapshot(QuotaSnapshot *snap);

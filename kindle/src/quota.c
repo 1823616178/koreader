@@ -18,7 +18,7 @@ double quota_clamp(double v)
 void quota_empty_snapshot(QuotaSnapshot *snap)
 {
     memset(snap, 0, sizeof(*snap));
-    strcpy(snap->display_mode, "used");
+    strcpy(snap->display_mode, "remaining");
     snap->alert_percent = 85.0;
 }
 
@@ -43,6 +43,7 @@ static void parse_window(const cJSON *obj, QuotaWindow *w)
     w->used = 0.0;
     w->has_reset_at = 0;
     w->reset_at = 0;
+    w->rate_limited = 0;
 
     if (!cJSON_IsObject(obj))
         return;
@@ -56,12 +57,55 @@ static void parse_window(const cJSON *obj, QuotaWindow *w)
     /* Out-of-range resetAt is treated as absent, window stays valid. */
     if (cJSON_IsNumber(reset_at) && double_to_ll(reset_at->valuedouble, &w->reset_at) == 0)
         w->has_reset_at = 1;
+
+    {
+        const cJSON *status = cJSON_GetObjectItemCaseSensitive(obj, "status");
+        if (cJSON_IsString(status) && status->valuestring &&
+            strcmp(status->valuestring, "rate-limited") == 0)
+            w->rate_limited = 1;
+    }
 }
 
 static void parse_provider(const cJSON *obj, ProviderQuota *p)
 {
+    const cJSON *fetched_at;
+
+    if (!cJSON_IsObject(obj))
+        return;
+    fetched_at = cJSON_GetObjectItemCaseSensitive(obj, "fetchedAt");
+    if (cJSON_IsNumber(fetched_at) &&
+        double_to_ll(fetched_at->valuedouble, &p->fetched_at) == 0)
+        p->has_fetched_at = 1;
     parse_window(cJSON_GetObjectItemCaseSensitive(obj, "five"), &p->five);
     parse_window(cJSON_GetObjectItemCaseSensitive(obj, "seven"), &p->seven);
+    parse_window(cJSON_GetObjectItemCaseSensitive(obj, "monthly"), &p->monthly);
+}
+
+/* OpenCode's canonical names are rolling/weekly. The five/seven aliases are
+ * accepted only when the canonical key is absent, so contradictory payloads
+ * deterministically prefer the documented canonical fields. */
+static void parse_opencode(const cJSON *obj, ProviderQuota *p)
+{
+    const cJSON *fetched_at;
+    const cJSON *five;
+    const cJSON *seven;
+
+    if (!cJSON_IsObject(obj))
+        return;
+    fetched_at = cJSON_GetObjectItemCaseSensitive(obj, "fetchedAt");
+    if (cJSON_IsNumber(fetched_at) &&
+        double_to_ll(fetched_at->valuedouble, &p->fetched_at) == 0)
+        p->has_fetched_at = 1;
+
+    five = cJSON_GetObjectItemCaseSensitive(obj, "rolling");
+    if (!five)
+        five = cJSON_GetObjectItemCaseSensitive(obj, "five");
+    seven = cJSON_GetObjectItemCaseSensitive(obj, "weekly");
+    if (!seven)
+        seven = cJSON_GetObjectItemCaseSensitive(obj, "seven");
+    parse_window(five, &p->five);
+    parse_window(seven, &p->seven);
+    parse_window(cJSON_GetObjectItemCaseSensitive(obj, "monthly"), &p->monthly);
 }
 
 int quota_parse_snapshot(const char *json, QuotaSnapshot *snap)
@@ -91,15 +135,27 @@ int quota_parse_snapshot(const char *json, QuotaSnapshot *snap)
     if (cJSON_IsNumber(item) && double_to_ll(item->valuedouble, &snap->generated_at) == 0)
         snap->has_generated_at = 1;
 
+    parse_provider(cJSON_GetObjectItemCaseSensitive(root, "grok"), &snap->grok);
     parse_provider(cJSON_GetObjectItemCaseSensitive(root, "claude"), &snap->claude);
     parse_provider(cJSON_GetObjectItemCaseSensitive(root, "codex"), &snap->codex);
     parse_provider(cJSON_GetObjectItemCaseSensitive(root, "kimi"), &snap->kimi);
+    parse_opencode(cJSON_GetObjectItemCaseSensitive(root, "opencode"), &snap->opencode);
 
     {
         const cJSON *agy = cJSON_GetObjectItemCaseSensitive(root, "agy");
+        const cJSON *fetched_at = cJSON_GetObjectItemCaseSensitive(agy, "fetchedAt");
+
+        if (cJSON_IsNumber(fetched_at) &&
+            double_to_ll(fetched_at->valuedouble, &snap->agy.fetched_at) == 0)
+            snap->agy.has_fetched_at = 1;
         parse_provider(cJSON_GetObjectItemCaseSensitive(agy, "gemini"), &snap->agy.gemini);
         /* JSON key is camelCase thirdParty, C field is third_party. */
         parse_provider(cJSON_GetObjectItemCaseSensitive(agy, "thirdParty"), &snap->agy.third_party);
+        /* AGY has one collection timestamp shared by its two quota groups. */
+        snap->agy.gemini.has_fetched_at = snap->agy.has_fetched_at;
+        snap->agy.gemini.fetched_at = snap->agy.fetched_at;
+        snap->agy.third_party.has_fetched_at = snap->agy.has_fetched_at;
+        snap->agy.third_party.fetched_at = snap->agy.fetched_at;
     }
 
     cJSON_Delete(root);
