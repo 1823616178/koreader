@@ -336,12 +336,17 @@ static void draw_info_card(const Ui *ui, int x, int y, const QuotaSnapshot *snap
     char generated[96];
     char ts[24];
     char pct[16];
+    char selected[16];
     int ix = x + ui->border + ui->card_padding;
     int iy = y + ui->border + ui->card_padding;
 
     quota_format_timestamp(ts, sizeof(ts), snap->has_generated_at, snap->generated_at);
     quota_format_percent(pct, sizeof(pct), snap->alert_percent);
     snprintf(generated, sizeof(generated), "快照 %s · 告警 %s", ts, pct);
+    snprintf(selected, sizeof(selected), "%d / 6",
+             snap->providers.grok + snap->providers.claude +
+             snap->providers.codex + snap->providers.kimi +
+             snap->providers.opencode + snap->providers.agy);
 
     draw_card_frame(ui, x, y);
     ui_text(ui, "数据接口", ui->px_card_title, ix, iy, ui->card_inner, ui->line_h,
@@ -351,6 +356,28 @@ static void draw_info_card(const Ui *ui, int x, int y, const QuotaSnapshot *snap
                     status_detail ? status_detail : "");
     iy += ui->wb_h + ui->gap5;
     draw_info_block(ui, ix, iy, "显示", mode, generated);
+    iy += ui->wb_h + ui->gap5;
+    draw_info_block(ui, ix, iy, "采集", selected, "按接口名单显示");
+}
+
+static void draw_provider_slot(const Ui *ui, int slot, int y0, const char *title,
+                               const ProviderQuota *pq, const QuotaSnapshot *snap,
+                               const char *five_label, const char *monthly_label)
+{
+    int x = ui->h_padding + (slot % 2) * (ui->card_w + ui->card_gap);
+    int y = y0 + (slot / 2) * (ui->card_h + ui->row_gap);
+
+    draw_provider_card(ui, x, y, title, pq, snap, five_label, monthly_label);
+}
+
+static void draw_info_slot(const Ui *ui, int slot, int y0,
+                           const QuotaSnapshot *snap,
+                           const char *status_state, const char *status_detail)
+{
+    int x = ui->h_padding + (slot % 2) * (ui->card_w + ui->card_gap);
+    int y = y0 + (slot / 2) * (ui->card_h + ui->row_gap);
+
+    draw_info_card(ui, x, y, snap, status_state, status_detail);
 }
 
 /* WiFi badge, top-right of the title bar: a small state dot + "WiFi" label.
@@ -538,7 +565,7 @@ void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
                        const char *status_state, const char *status_detail, int loading,
                        int wifi_state)
 {
-    int x0, x1, y0, dy;
+    int card_count, rows, drawn_h, slack, y0, slot = 0;
 
     if (!ui || !snap)
         return;
@@ -548,30 +575,41 @@ void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
     draw_title_bar(ui, host);
     draw_wifi_badge(ui, wifi_state);
 
-    x0 = ui->h_padding;
-    x1 = ui->h_padding + ui->card_w + ui->card_gap;
-    y0 = ui->body_y;
-    dy = ui->card_h + ui->card_gap;
+    /* One card per ordinary provider, two for AGY, plus the always-visible
+     * connection card. Disabled providers are omitted and the remaining
+     * cards pack left-to-right, top-to-bottom. */
+    card_count = 1 + snap->providers.grok + snap->providers.claude +
+                 snap->providers.codex + snap->providers.kimi +
+                 snap->providers.opencode + 2 * snap->providers.agy;
+    rows = (card_count + 1) / 2;
+    drawn_h = rows * ui->card_h + rows * ui->row_gap + ui->button_h;
+    slack = ui->h - ui->title_h - drawn_h;
+    y0 = ui->title_h + (slack > 0 ? slack / 2 : 0);
 
-    dy = ui->card_h + ui->row_gap;
+    if (snap->providers.grok)
+        draw_provider_slot(ui, slot++, y0, "Grok", &snap->grok, snap,
+                           "5 小时", "月额度");
+    if (snap->providers.claude)
+        draw_provider_slot(ui, slot++, y0, "Claude Code", &snap->claude, snap,
+                           "5 小时", NULL);
+    if (snap->providers.codex)
+        draw_provider_slot(ui, slot++, y0, "Codex", &snap->codex, snap,
+                           "5 小时", NULL);
+    if (snap->providers.kimi)
+        draw_provider_slot(ui, slot++, y0, "Kimi Code", &snap->kimi, snap,
+                           "5 小时", NULL);
+    if (snap->providers.opencode)
+        draw_provider_slot(ui, slot++, y0, "OpenCode Go", &snap->opencode, snap,
+                           "滚动 5h", "月额度");
+    if (snap->providers.agy) {
+        draw_provider_slot(ui, slot++, y0, "AGY · Gemini", &snap->agy.gemini, snap,
+                           "5 小时", NULL);
+        draw_provider_slot(ui, slot++, y0, "AGY · Claude/GPT",
+                           &snap->agy.third_party, snap, "5 小时", NULL);
+    }
+    draw_info_slot(ui, slot, y0, snap, status_state, status_detail);
 
-    draw_provider_card(ui, x0, y0, "Grok", &snap->grok, snap,
-                       "5 小时", "月额度");
-    draw_provider_card(ui, x1, y0, "Claude Code", &snap->claude, snap,
-                       "5 小时", NULL);
-    draw_provider_card(ui, x0, y0 + dy, "Codex", &snap->codex, snap,
-                       "5 小时", NULL);
-    draw_provider_card(ui, x1, y0 + dy, "Kimi Code", &snap->kimi, snap,
-                       "5 小时", NULL);
-    draw_provider_card(ui, x0, y0 + 2 * dy, "OpenCode Go", &snap->opencode, snap,
-                       "滚动 5h", "月额度");
-    draw_provider_card(ui, x1, y0 + 2 * dy, "AGY · Gemini", &snap->agy.gemini, snap,
-                       "5 小时", NULL);
-    draw_provider_card(ui, x0, y0 + 3 * dy, "AGY · Claude/GPT",
-                       &snap->agy.third_party, snap, "5 小时", NULL);
-    draw_info_card(ui, x1, y0 + 3 * dy, snap, status_state, status_detail);
-
-    draw_buttons(ui, y0 + 4 * ui->card_h + 4 * ui->row_gap, loading);
+    draw_buttons(ui, y0 + rows * ui->card_h + rows * ui->row_gap, loading);
 }
 
 UiAction ui_hit_button(const Ui *ui, int x, int y)

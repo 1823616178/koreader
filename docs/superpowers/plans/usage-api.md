@@ -25,19 +25,40 @@ HOST=127.0.0.1 PORT=8787 node server.js
 
 ---
 
+## 采集名单
+
+改下面这块即可控制本机采集哪些工具：`true` 采集，`false` 跳过。也可以写成名称数组，例如 `["grok", "claude"]`。仪表盘 Track 按钮会改写这一块。每次请求都会重新读取，保存后无需重启。
+
+```providers
+{
+  "grok": true,
+  "claude": true,
+  "codex": true,
+  "kimi": true,
+  "opencode": true,
+  "agy": true
+}
+```
+
+可用名字：`grok`、`claude`、`codex`、`kimi`、`opencode`、`agy`。
+
+---
+
 ## 2. 路由一览
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/usage` | 聚合额度 JSON。本文主体。 |
+| `GET` | `/api/providers` | 当前纳入统计的工具开关 |
+| `PUT` / `PATCH` | `/api/providers` | 更新工具开关，写入本文「采集名单」代码块 |
 | `GET` | `/` | 仪表盘页面 |
 | `GET` | `/k`、`/r`、`/e`、`/kr`、`/kobo`、`/eink` | KOBO / 墨水屏页，显示**剩余**额度 |
 | `GET` | `/u`、`/ku` | KOBO 页，显示**已用**额度 |
 | `GET` | `/styles.css`、`/app.js` | 前台静态资源 |
 
-页面可通过 `?mode=used` 或 `?mode=remaining` 覆盖显示模式。`/api/usage` **没有** query 参数，`displayMode` 只反映服务端环境变量 `DISPLAY_MODE`（默认 `remaining`）。
+页面可通过 `?mode=used` 或 `?mode=remaining` 覆盖显示模式。`GET /api/usage` 可用 `providers`（或 `tools`）指定本次要查哪些工具，见下文。未传参时，以本文「采集名单」为准。
 
-下文只描述 `/api/usage`。
+未选中的工具仍会出现在 JSON 里，但窗口为 `null`，并且本次不会去采集。以响应里的 `providers` 字段为准。
 
 ---
 
@@ -50,7 +71,27 @@ GET /api/usage HTTP/1.1
 Host: 127.0.0.1:8787
 ```
 
-无 path 参数、无 query、无 body、无自定义请求头要求。
+无 body。可选 query：
+
+| 参数 | 说明 |
+| --- | --- |
+| `providers` | 本次要返回额度的工具，逗号分隔。别名：`tools`、`tool`、`provider`。可重复。 |
+
+可用名字：`grok`、`claude`、`codex`、`kimi`、`opencode`、`agy`。
+
+```http
+GET /api/usage?providers=grok,claude
+GET /api/usage?tools=codex
+GET /api/usage?providers=grok&providers=kimi
+```
+
+传了这个参数后，**只采集、只启用这些工具**，不改文档里的采集名单。没传则用文档默认名单。
+
+全部名字都不认识时返回 HTTP `400`：
+
+```json
+{ "error": "Unknown tool. Use grok, claude, codex, kimi, opencode, agy" }
+```
 
 ### 成功响应
 
@@ -78,6 +119,44 @@ Cache-Control: no-store
 
 未知路径返回纯文本 `404 Not found`。
 
+---
+
+## 3b. 工具开关 `/api/providers`
+
+关闭某个工具后，仪表盘不再采集它（不会拉起对应 CLI / PTY），卡片也会隐藏。开关只保存在本文「采集名单」代码块里。每次请求都会重新读取，手工改文档后无需重启。
+
+### 读取
+
+```http
+GET /api/providers HTTP/1.1
+```
+
+```json
+{
+  "providers": {
+    "grok": true,
+    "claude": true,
+    "codex": false,
+    "kimi": true,
+    "opencode": true,
+    "agy": false
+  }
+}
+```
+
+### 更新
+
+```http
+PUT /api/providers HTTP/1.1
+Content-Type: application/json
+```
+
+```json
+{ "providers": { "codex": false, "agy": false } }
+```
+
+只提交要改的键；未出现的工具保持原值。`PATCH` 行为相同。非法 JSON 返回 HTTP `400`。
+
 ### 超时
 
 首次请求可能要等 Grok / Claude / Kimi / AGY 拉起临时进程。客户端超时建议 **≥ 45 秒**。缓存命中后通常很快。
@@ -91,6 +170,7 @@ Cache-Control: no-store
 | `displayMode` | `"used"` \| `"remaining"` | 前台默认显示模式。默认 `"remaining"`。**不改变**各窗口 `used` 的含义。 |
 | `alertPercent` | `number` | 已用百分比警示阈值，默认 `85`。 |
 | `generatedAt` | `number` | 本次 HTTP 响应生成时间，Unix epoch **毫秒**。 |
+| `providers` | `object` | 各工具是否纳入统计，键为 `grok` / `claude` / `codex` / `kimi` / `opencode` / `agy`，值为布尔。 |
 | `grok` | `GrokUsage` | Grok Build / SuperGrok |
 | `claude` | `ProviderUsage` | Claude Code |
 | `codex` | `ProviderUsage` | Codex |
@@ -205,6 +285,14 @@ interface AgyUsage {
   "displayMode": "remaining",
   "alertPercent": 85,
   "generatedAt": 1785695952333,
+  "providers": {
+    "grok": true,
+    "claude": true,
+    "codex": true,
+    "kimi": true,
+    "opencode": true,
+    "agy": true
+  },
   "grok": {
     "fetchedAt": 1785695890000,
     "five": null,
@@ -257,6 +345,9 @@ interface AgyUsage {
 ```bash
 curl --fail --silent --show-error \
   http://127.0.0.1:8787/api/usage
+
+curl --fail --silent --show-error \
+  'http://127.0.0.1:8787/api/usage?providers=grok,claude'
 ```
 
 只取 Grok 周剩余：

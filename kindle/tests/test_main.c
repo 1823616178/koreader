@@ -1,7 +1,7 @@
 /* Host-side unit tests for the device-independent modules (config/quota/http/input/net).
  *
- * Required fixture for the http tests: from a directory containing an
- * index.txt whose content is "hello-aiquota", run:
+ * Required server for the http tests: from kindle/tests (which contains the
+ * checked-in index.txt fixture), run:
  *
  *     python3 -m http.server 18080 --bind 127.0.0.1
  *
@@ -84,6 +84,14 @@ static const char *EXAMPLE_JSON =
     "  \"displayMode\": \"remaining\",\n"
     "  \"alertPercent\": 85,\n"
     "  \"generatedAt\": 1785695952333,\n"
+    "  \"providers\": {\n"
+    "    \"grok\": true,\n"
+    "    \"claude\": true,\n"
+    "    \"codex\": true,\n"
+    "    \"kimi\": true,\n"
+    "    \"opencode\": true,\n"
+    "    \"agy\": true\n"
+    "  },\n"
     "  \"grok\": {\n"
     "    \"fetchedAt\": 1785695890000,\n"
     "    \"five\": null,\n"
@@ -144,6 +152,18 @@ static void test_normalize_url(void)
 
     config_normalize_url(buf, sizeof(buf), "https://h:8443/api/usage/");
     CHECK(strcmp(buf, "https://h:8443/api/usage") == 0);
+
+    config_normalize_url(buf, sizeof(buf),
+                         "h:8787?providers=grok,claude");
+    CHECK(strcmp(buf, "http://h:8787/api/usage?providers=grok,claude") == 0);
+
+    config_normalize_url(buf, sizeof(buf),
+                         "http://h/api/usage?providers=grok&providers=kimi");
+    CHECK(strcmp(buf,
+                 "http://h/api/usage?providers=grok&providers=kimi") == 0);
+
+    config_normalize_url(buf, sizeof(buf), "http://h/x/?tools=codex");
+    CHECK(strcmp(buf, "http://h/x/api/usage?tools=codex") == 0);
 
     /* Tiny dst: truncates safely and stays NUL-terminated. */
     {
@@ -259,6 +279,12 @@ static void test_parse_full_example(void)
     CHECK(dbl_eq(snap.alert_percent, 85.0));
     CHECK(snap.has_generated_at == 1);
     CHECK(snap.generated_at == 1785695952333LL);
+    CHECK(snap.providers.grok == 1);
+    CHECK(snap.providers.claude == 1);
+    CHECK(snap.providers.codex == 1);
+    CHECK(snap.providers.kimi == 1);
+    CHECK(snap.providers.opencode == 1);
+    CHECK(snap.providers.agy == 1);
 
     CHECK(snap.grok.has_fetched_at == 1);
     CHECK(snap.grok.fetched_at == 1785695890000LL);
@@ -302,6 +328,38 @@ static void test_parse_full_example(void)
     CHECK(snap.agy.third_party.five.reset_at == 1785713952000LL);
     CHECK(snap.agy.third_party.seven.valid == 1);
     CHECK(dbl_eq(snap.agy.third_party.seven.used, 0.0));
+}
+
+static void test_parse_provider_selection(void)
+{
+    QuotaSnapshot snap;
+    const char *json =
+        "{ \"providers\": {"
+        " \"grok\": true, \"claude\": false, \"codex\": false,"
+        " \"kimi\": true, \"opencode\": false, \"agy\": false } }";
+
+    CHECK(quota_parse_snapshot(json, &snap) == 0);
+    CHECK(snap.providers.grok == 1);
+    CHECK(snap.providers.claude == 0);
+    CHECK(snap.providers.codex == 0);
+    CHECK(snap.providers.kimi == 1);
+    CHECK(snap.providers.opencode == 0);
+    CHECK(snap.providers.agy == 0);
+
+    /* Missing map/keys and malformed values retain the backward-compatible
+     * all-enabled default instead of unexpectedly hiding cards. */
+    CHECK(quota_parse_snapshot(
+        "{ \"providers\": { \"grok\": false, \"claude\": \"false\" } }",
+        &snap) == 0);
+    CHECK(snap.providers.grok == 0);
+    CHECK(snap.providers.claude == 1);
+    CHECK(snap.providers.codex == 1);
+    CHECK(snap.providers.kimi == 1);
+    CHECK(snap.providers.opencode == 1);
+    CHECK(snap.providers.agy == 1);
+
+    CHECK(quota_parse_snapshot("{}", &snap) == 0);
+    CHECK(snap.providers.grok == 1 && snap.providers.agy == 1);
 }
 
 static void test_parse_opencode_names_and_status(void)
@@ -357,7 +415,7 @@ static void test_parse_kimi_null(void)
     CHECK(snap.agy.third_party.five.valid == 1 && dbl_eq(snap.agy.third_party.five.used, 0.0));
     CHECK(snap.alert_percent == 85.0); /* missing -> default 85 */
     CHECK(snap.has_generated_at == 0);
-    CHECK(strcmp(snap.display_mode, "remaining") == 0); /* missing -> API default */
+    CHECK(strcmp(snap.display_mode, "used") == 0);
 }
 
 static void test_parse_remaining_mode(void)
@@ -373,6 +431,15 @@ static void test_parse_remaining_mode(void)
     CHECK(snap.claude.five.valid == 1 && dbl_eq(snap.claude.five.used, 42.0));
     CHECK(dbl_eq(quota_display_value(&snap.claude.five, snap.display_mode), 58.0));
     CHECK(dbl_eq(quota_display_value(&snap.claude.five, "used"), 42.0));
+
+    CHECK(quota_parse_snapshot(
+        "{ \"displayMode\": \"used\", \"claude\": { \"five\": { \"used\": 42 } } }",
+        &snap) == 0);
+    CHECK(strcmp(snap.display_mode, "used") == 0);
+    CHECK(dbl_eq(quota_display_value(&snap.claude.five, snap.display_mode), 42.0));
+
+    CHECK(quota_parse_snapshot("{}", &snap) == 0);
+    CHECK(strcmp(snap.display_mode, "remaining") == 0);
 
     /* Non-numeric used -> window invalid. */
     CHECK(quota_parse_snapshot("{ \"claude\": { \"five\": { \"used\": \"42\" } } }", &snap) == 0);
@@ -489,6 +556,15 @@ static void test_http_get(void)
     char *body;
 
     body = http_get("http://127.0.0.1:18080/index.txt", &status, err, sizeof(err));
+    CHECK(body != NULL);
+    if (body) {
+        CHECK(status == 200);
+        CHECK(strstr(body, "hello-aiquota") != NULL);
+        free(body);
+    }
+
+    body = http_get("http://127.0.0.1:18080/index.txt?providers=grok,claude",
+                    &status, err, sizeof(err));
     CHECK(body != NULL);
     if (body) {
         CHECK(status == 200);
@@ -803,6 +879,7 @@ int main(void)
     RUN(test_normalize_url);
     RUN(test_config_roundtrip);
     RUN(test_parse_full_example);
+    RUN(test_parse_provider_selection);
     RUN(test_parse_opencode_names_and_status);
     RUN(test_parse_kimi_null);
     RUN(test_parse_remaining_mode);

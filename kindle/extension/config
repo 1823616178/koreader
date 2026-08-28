@@ -1,5 +1,6 @@
 # AI Quota configuration. Edit over USB, then reopen the app.
-# API endpoint: host, host:port, or full /api/usage URL.
+# API endpoint: host, host:port, or full /api/usage URL. Optional per-request
+# filter example: http://host:8787/api/usage?providers=grok,claude
 api_url=http://123.161.179.32:46927/api/usage
 
 # Touch calibration (0/1). Run `aiquota --calibrate` over SSH to determine.
@@ -8,5 +9,11 @@ touch_mirror_x=0
 touch_mirror_y=0
 
 # Idle auto-exit: seconds without a tap before the app closes itself and gives
-# the framework back. Clamped to 60..3600; 0 or invalid means the 600 default.
+# the framework back. Clamped to 60..3600; 0 disables auto-exit.
 idle_timeout_s=600
+
+# Release WiFi after a fetch only when this app raised it (0/1).
+wifi_auto_off=1
+
+# Periodic refresh interval in minutes. 0 disables; valid range is 1..60.
+auto_refresh_min=0

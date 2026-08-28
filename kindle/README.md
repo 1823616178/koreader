@@ -2,7 +2,7 @@
 
 ## 1. 项目简介
 
-这是 KOReader 插件 `readingquota.koplugin` 的 Kindle 原生 C 移植：不依赖 KOReader，用 FBInk 直接写 framebuffer 渲染界面，提供 KUAL 菜单与书库 Scriptlet 双入口。完整的设计依据、技术选型和风险分析见仓库根目录的 [`kindle-port.zh-CN.md`](../kindle-port.zh-CN.md)。
+这是 AI Credits Usage API 的 Kindle 原生 C 客户端：不依赖 KOReader，用 FBInk 直接写 framebuffer 渲染 Grok、Claude Code、Codex、Kimi Code、OpenCode Go 和 Antigravity 额度，提供 KUAL 菜单与书库 Scriptlet 双入口。完整的设计依据、技术选型和风险分析见仓库根目录的 [`kindle-port.zh-CN.md`](../kindle-port.zh-CN.md)。
 
 目标设备：Kindle，固件 5.16.2.1.1（softfloat ABI），已越狱。
 
@@ -81,6 +81,8 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 - **设置** —— 打开机内设置页（见下节），接口地址 / WiFi / 自动刷新 / 自动退出都在这里改。
 - **关闭** —— 退出应用，脚本自动恢复 framework。
 
+接口响应中的 `providers` 是当前采集名单；关闭的工具不会显示卡片，其余卡片会自动重新紧凑排列。需要只查询部分工具时，可在配置文件的地址后加 `?providers=grok,claude`，该筛选只影响本次 Kindle 请求，不改服务端采集名单。
+
 **省电行为**：每次拉取数据时才唤醒 WiFi，拉完立即交还——且只有「应用自己开的射频」才会被关掉，进应用前就连着的 WiFi 不受影响。空闲期射频完全离线；e-ink 靠自身稳态保持画面，不需要供电。标题栏右上角有 WiFi 状态角标（实心点=已连接，灰点=已断开），拉取后变灰即代表射频已经归还。
 
 ### 设置页
@@ -100,7 +102,7 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 
 | 键 | 含义 |
 | --- | --- |
-| `api_url` | 数据接口地址。可以写 `host`、`host:port` 或完整 URL |
+| `api_url` | 数据接口地址。可以写 `host`、`host:port` 或完整 URL；支持 `?providers=grok,claude` 筛选 |
 | `touch_swap_xy` | 触摸坐标交换 X/Y 轴（0/1），由 `--calibrate` 确定 |
 | `touch_mirror_x` | 触摸 X 轴镜像（0/1） |
 | `touch_mirror_y` | 触摸 Y 轴镜像（0/1） |
@@ -108,14 +110,14 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 | `wifi_auto_off` | 拉取完成后是否关掉「由应用自己开启的」WiFi（默认 1）。写 0 则拉完保持连接 |
 | `auto_refresh_min` | 自动刷新间隔（分钟），默认 0=关闭，范围 1–60，超界取 60 |
 
-`api_url` 会做归一化（与 KOReader 版 `quotadata.lua` 同逻辑）：没有 scheme 就补 `http://`、去掉尾部斜杠、结尾不是 `/api/usage` 就补上。例如写 `123.161.179.32:46927` 等价于 `http://123.161.179.32:46927/api/usage`。
+`api_url` 会做归一化：没有 scheme 就补 `http://`、去掉路径尾部斜杠、路径结尾不是 `/api/usage` 就补上，并原样保留 query。例如写 `123.161.179.32:46927?providers=grok,claude` 等价于 `http://123.161.179.32:46927/api/usage?providers=grok,claude`。机内键盘只适合改 IP 和端口，筛选名单请通过 USB 编辑配置文件。
 
 ## 7. 调试开关
 
 三个开关都在 SSH 里直接跑二进制使用（`/mnt/us/extensions/aiquota/bin/aiquota --xxx`）：
 
 - `--dump-state` —— 打印 `fbink_get_state()` 的全部字段（分辨率、DPI、旋转、bpp 等），用来核对设备实际参数。
-- `--demo` —— 用内置的示例 JSON（`usage-api.md` 里的完整示例）渲染界面，不联网，用来验证布局和字体。
+- `--demo` —— 用内置的示例 JSON（[`docs/superpowers/plans/usage-api.md`](../docs/superpowers/plans/usage-api.md) 里的完整示例）渲染界面，不联网，用来验证 8 张卡片、月额度、布局和字体。
 - `--calibrate` —— 触摸标定。按提示依次点屏幕四角，程序根据落点推导坐标变换，最后直接输出建议的配置行：
 
 ```
@@ -136,7 +138,7 @@ touch_mirror_y=0
 1. **二进制验证**：WSL 里 `file kindle/extension/bin/aiquota` 应输出 `ARM ... EABI5 ... soft-float`；`readelf -d` 的 NEEDED 里不应出现 libfbink（`tools/build.sh` 已自动校验这两项）。
 2. **dump-state**：SSH 里跑 `aiquota --dump-state`，输出的分辨率 / 旋转应与设备实际一致。
 3. **calibrate**：SSH 里跑 `aiquota --calibrate`，依次点四角，确认十字线落点准确；把输出的三行建议参数写进 `config`。
-4. **demo 对照**：SSH 里跑 `aiquota --demo`，对照仓库根目录的 `preview-partial.png` 检查布局；再改 demo JSON 造出「某提供商为 null」和「超过 alertPercent」两种情况，确认「暂无数据」和 `!` 告警标记都对。
+4. **demo 检查**：SSH 里跑 `aiquota --demo`，确认 4×2 卡片全部在屏内、底部按钮可见，Grok / OpenCode 的月额度和其他提供商的采集时间正常显示；再改 demo JSON 造出「某提供商为 null」「超过 alertPercent」和 OpenCode `rate-limited` 三种情况，确认「暂无数据」、`!` 和「已限流」都对。
 5. **真实拉取与错误路径**：配好真实 `api_url` 跑一次联网拉取；再把 URL 改成不可达地址，确认界面走错误卡片而不是崩溃。
 6. **KUAL 入口完整交互**：从 KUAL 启动 → 完成「改地址 → 刷新 → 关闭」一轮 → **确认 framework 完全恢复**（能翻书、能进设置、能息屏唤醒）。这是整个移植的关键验收点。
 7. **书库 Scriptlet 入口**：从书库图标启动，重复第 6 步。
@@ -178,4 +180,4 @@ bash kindle/tests/watchdog_sim.sh   # 看门狗：心跳超时、杀不掉后的
 
 ## 10. 与 KOReader 插件的关系
 
-KOReader 原版插件原样保留在仓库根目录的 `readingquota.koplugin/`，继续维护、不受影响。两端共享 [`usage-api.md`](../usage-api.md) 这一份接口契约：任何一端对接口语义（`used` 恒为已用百分比、null 提供商显示「暂无数据」、45 秒超时等）的改动，另一端都要同步。
+KOReader 原版插件原样保留在仓库根目录的 `readingquota.koplugin/`，继续维护、不受影响。Kindle 端当前以 [`docs/superpowers/plans/usage-api.md`](../docs/superpowers/plans/usage-api.md) 为接口契约，并兼容 OpenCode 的 `five` / `seven` 别名；接口后续增加字段时，解析器会忽略未知键。

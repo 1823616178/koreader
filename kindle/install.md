@@ -104,7 +104,7 @@ rm /mnt/us/aiquota-kindle.tar.gz   # 可选：清掉安装包
 /mnt/us/extensions/aiquota/bin/aiquota --demo
 ```
 
-用内置示例数据画一屏，不联网。对照仓库根目录的 `preview-partial.png` 看布局；中文如果全是方框，说明字体没随包装上。
+用内置示例数据画一屏，不联网。确认 4×2 卡片和底部按钮都完整可见，Grok / OpenCode 月额度正常显示；中文如果全是方框，说明字体没随包装上。
 
 ### 4.3 标定触摸（**别跳过**）
 
@@ -157,13 +157,15 @@ touch_mirror_y=0
 
 | 键 | 含义 |
 | --- | --- |
-| `api_url` | 数据接口地址。写 `host`、`host:port` 或完整 URL 都行 |
+| `api_url` | 数据接口地址。写 `host`、`host:port` 或完整 URL 都行；可追加 `?providers=grok,claude` |
 | `touch_swap_xy` | 触摸 X/Y 轴交换（0/1），由 `--calibrate` 确定 |
 | `touch_mirror_x` | 触摸 X 轴镜像（0/1） |
 | `touch_mirror_y` | 触摸 Y 轴镜像（0/1） |
-| `idle_timeout_s` | 多少秒没有触摸就自动退出、交还 framework。范围 60–3600，写 0 或非法值取默认 600 |
+| `idle_timeout_s` | 多少秒没有触摸就自动退出、交还 framework。范围 60–3600；写 0 表示不自动退出 |
+| `wifi_auto_off` | 拉取后是否关闭由应用开启的 WiFi（0/1，默认 1） |
+| `auto_refresh_min` | 自动刷新间隔，单位分钟；0=关闭，范围 1–60 |
 
-`api_url` 会自动归一化：没有 scheme 补 `http://`、去掉尾部斜杠、结尾不是 `/api/usage` 就补上。所以写 `123.161.179.32:46927` 等价于 `http://123.161.179.32:46927/api/usage`。
+`api_url` 会自动归一化：没有 scheme 补 `http://`、去掉路径尾部斜杠、结尾不是 `/api/usage` 就补上，并保留 query。所以写 `123.161.179.32:46927?providers=grok,claude` 等价于 `http://123.161.179.32:46927/api/usage?providers=grok,claude`。机内数字键盘不能输入工具名，筛选名单请通过 USB 直接编辑此文件。
 
 注意：**不支持 https**（没链 TLS 库），接口必须是明文 HTTP。
 

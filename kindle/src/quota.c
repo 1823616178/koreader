@@ -20,6 +20,14 @@ void quota_empty_snapshot(QuotaSnapshot *snap)
     memset(snap, 0, sizeof(*snap));
     strcpy(snap->display_mode, "remaining");
     snap->alert_percent = 85.0;
+    /* Backward compatibility: responses predating the providers map implied
+     * that every known tool was enabled. Loading skeletons use the same set. */
+    snap->providers.grok = 1;
+    snap->providers.claude = 1;
+    snap->providers.codex = 1;
+    snap->providers.kimi = 1;
+    snap->providers.opencode = 1;
+    snap->providers.agy = 1;
 }
 
 /* Cast a JSON number to long long only when it fits (and is not NaN); cJSON
@@ -108,6 +116,16 @@ static void parse_opencode(const cJSON *obj, ProviderQuota *p)
     parse_window(cJSON_GetObjectItemCaseSensitive(obj, "monthly"), &p->monthly);
 }
 
+static int provider_enabled(const cJSON *providers, const char *name, int fallback)
+{
+    const cJSON *item;
+
+    if (!cJSON_IsObject(providers))
+        return fallback;
+    item = cJSON_GetObjectItemCaseSensitive(providers, name);
+    return cJSON_IsBool(item) ? (cJSON_IsTrue(item) ? 1 : 0) : fallback;
+}
+
 int quota_parse_snapshot(const char *json, QuotaSnapshot *snap)
 {
     cJSON *root = cJSON_Parse(json);
@@ -124,8 +142,8 @@ int quota_parse_snapshot(const char *json, QuotaSnapshot *snap)
 
     item = cJSON_GetObjectItemCaseSensitive(root, "displayMode");
     if (cJSON_IsString(item) && item->valuestring &&
-        strcmp(item->valuestring, "remaining") == 0)
-        strcpy(snap->display_mode, "remaining");
+        strcmp(item->valuestring, "used") == 0)
+        strcpy(snap->display_mode, "used");
 
     item = cJSON_GetObjectItemCaseSensitive(root, "alertPercent");
     if (cJSON_IsNumber(item))
@@ -134,6 +152,14 @@ int quota_parse_snapshot(const char *json, QuotaSnapshot *snap)
     item = cJSON_GetObjectItemCaseSensitive(root, "generatedAt");
     if (cJSON_IsNumber(item) && double_to_ll(item->valuedouble, &snap->generated_at) == 0)
         snap->has_generated_at = 1;
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "providers");
+    snap->providers.grok = provider_enabled(item, "grok", snap->providers.grok);
+    snap->providers.claude = provider_enabled(item, "claude", snap->providers.claude);
+    snap->providers.codex = provider_enabled(item, "codex", snap->providers.codex);
+    snap->providers.kimi = provider_enabled(item, "kimi", snap->providers.kimi);
+    snap->providers.opencode = provider_enabled(item, "opencode", snap->providers.opencode);
+    snap->providers.agy = provider_enabled(item, "agy", snap->providers.agy);
 
     parse_provider(cJSON_GetObjectItemCaseSensitive(root, "grok"), &snap->grok);
     parse_provider(cJSON_GetObjectItemCaseSensitive(root, "claude"), &snap->claude);

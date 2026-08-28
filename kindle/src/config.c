@@ -51,7 +51,9 @@ int config_clamp_auto_refresh(int mins)
 void config_normalize_url(char *dst, size_t dst_size, const char *src)
 {
     char buf[1050]; /* scheme prefix + input + "/api/usage" + NUL */
+    char query[1050];
     const char *start = src ? src : "";
+    char *query_start;
     size_t len;
     size_t pos = 0;
 
@@ -77,6 +79,17 @@ void config_normalize_url(char *dst, size_t dst_size, const char *src)
         len = sizeof(buf) - pos - 11;
     memcpy(buf + pos, start, len);
     pos += len;
+    buf[pos] = '\0';
+
+    /* The API now accepts ?providers=... (and aliases). Normalize the path
+     * before the query, then put the complete query back unchanged. */
+    query[0] = '\0';
+    query_start = strchr(buf, '?');
+    if (query_start) {
+        snprintf(query, sizeof(query), "%s", query_start);
+        pos = (size_t)(query_start - buf);
+        buf[pos] = '\0';
+    }
 
     while (pos > 0 && buf[pos - 1] == '/')
         pos--;
@@ -85,6 +98,15 @@ void config_normalize_url(char *dst, size_t dst_size, const char *src)
     if (pos < 10 || memcmp(buf + pos - 10, "/api/usage", 10) != 0) {
         memcpy(buf + pos, "/api/usage", 10);
         pos += 10;
+        buf[pos] = '\0';
+    }
+
+    if (query[0] != '\0') {
+        size_t qlen = strlen(query);
+        if (qlen > sizeof(buf) - pos - 1)
+            qlen = sizeof(buf) - pos - 1;
+        memcpy(buf + pos, query, qlen);
+        pos += qlen;
         buf[pos] = '\0';
     }
 

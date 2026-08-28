@@ -20,10 +20,20 @@ typedef struct {
 } ProviderQuota;
 
 typedef struct {
+    int grok;
+    int claude;
+    int codex;
+    int kimi;
+    int opencode;
+    int agy;
+} ProviderSelection;
+
+typedef struct {
     char display_mode[12];        /* "used" | "remaining" */
     double alert_percent;         /* clamped, default 85 */
     int has_generated_at;
     long long generated_at;       /* unix epoch ms */
+    ProviderSelection providers;  /* response selection; disabled cards stay hidden */
     ProviderQuota grok, claude, codex, kimi, opencode;
     struct {
         int has_fetched_at;
