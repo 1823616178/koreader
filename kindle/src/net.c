@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strncasecmp */
+#include <time.h>
 #include <unistd.h>
 
 #include "watchdog.h"
@@ -21,6 +23,13 @@
  * re-armed per call rather than once for the whole function, because the poll
  * loop's own budget counts only its sleeps, not the probes in between. */
 #define NET_CMD_S 30
+
+/* Battery and link info sources. yoshi_battery exists on PW2 and later (the
+ * whole kindlepw2 family); plain file reads, no daemon round-trip. `iw` is
+ * only spawned while the radio is already up, so the title bar adds no
+ * wakeups of its own. */
+#define BATT_SYSFS "/sys/devices/system/yoshi_battery/yoshi_battery0"
+#define IW_LINK_CMD "iw dev wlan0 link 2>/dev/null"
 
 /* Last state wifi_probe actually observed: 1 CONNECTED, 0 not connected,
  * -1 never probed (or only failed probes so far). Feeds the dashboard's
@@ -121,4 +130,134 @@ int net_ensure_wifi(void)
         }
     }
     return -1;
+}
+
+/* --- title-bar status: SSID + battery -------------------------------------- */
+
+/* First line of `path` through strtol; -1 when missing or not numeric. */
+static long sysfs_long(const char *path)
+{
+    FILE *f;
+    char buf[64];
+    long v = -1;
+
+    f = fopen(path, "r");
+    if (!f)
+        return -1;
+    if (fgets(buf, sizeof(buf), f))
+        v = strtol(buf, NULL, 10);
+    fclose(f);
+    return v;
+}
+
+/* yoshi reports "1" while charging and "0" otherwise; accept the generic
+ * power_supply spellings too. "Full" counts as charging (on the plug) --
+ * the badge means "wall power", not a charge in progress. -1 unreadable. */
+static int sysfs_charging(void)
+{
+    FILE *f;
+    char buf[64];
+    int chg = -1;
+
+    f = fopen(BATT_SYSFS "/battery_status", "r");
+    if (!f)
+        return -1;
+    if (fgets(buf, sizeof(buf), f)) {
+        if (buf[0] == '1' || strncasecmp(buf, "charg", 5) == 0 ||
+            strncasecmp(buf, "full", 4) == 0)
+            chg = 1;
+        else
+            chg = 0;
+    }
+    fclose(f);
+    return chg;
+}
+
+int net_battery(int *pct, int *charging)
+{
+    long level = sysfs_long(BATT_SYSFS "/battery_level");
+
+    *pct = (level >= 0 && level <= 100) ? (int)level : -1;
+    *charging = sysfs_charging();
+    return *pct >= 0 ? 0 : -1;
+}
+
+void net_sanitize_ssid(char *s)
+{
+    size_t r = 0, w = 0;
+
+    if (!s)
+        return;
+    /* First cut to printable ASCII. */
+    while (s[r] != '\0') {
+        unsigned char c = (unsigned char)s[r];
+
+        if (c < 0x20 || c > 0x7E)
+            break;
+        s[w++] = s[r++];
+    }
+    s[w] = '\0';
+    /* Then trim the spaces the cut may have left at either end. */
+    r = 0;
+    while (s[r] == ' ')
+        r++;
+    if (r > 0) {
+        w -= r;
+        memmove(s, s + r, w + 1);
+    }
+    while (w > 0 && s[w - 1] == ' ')
+        s[--w] = '\0';
+}
+
+void net_wifi_ssid(char *buf, size_t n)
+{
+    FILE *p;
+    char line[256];
+
+    if (!buf || n == 0)
+        return;
+    buf[0] = '\0';
+    /* No spawn while the radio is down or unprobed: that is the idle state
+     * most of the app's life, and the badge has nothing to name there. */
+    if (g_wifi_state != 1)
+        return;
+
+    wd_expect(NET_CMD_S);
+    p = popen(IW_LINK_CMD, "r");
+    if (!p)
+        return;
+    while (fgets(line, sizeof(line), p)) {
+        if (strncmp(line, "SSID:", 5) == 0) {
+            size_t len = strlen(line + 5);
+            size_t room = n < 65 ? n : 65; /* SSID caps at 32 octets anyway */
+
+            if (len > room - 1)
+                len = room - 1;
+            memcpy(buf, line + 5, len);
+            buf[len] = '\0';
+            break; /* first SSID line is the connected BSS */
+        }
+    }
+    pclose(p);
+    net_sanitize_ssid(buf);
+}
+
+/* --- screensaver hold ------------------------------------------------------ */
+
+/* Refresh cadence: comfortably under powerd's usual ~10 min idle timer, so
+ * even a hold that expires silently is re-armed long before the lock screen
+ * could ever engage. */
+#define SCREENSAVER_HOLD_S 240
+
+void net_hold_screensaver(void)
+{
+    static time_t last;
+    time_t now = time(NULL);
+
+    if (last != 0 && now - last < SCREENSAVER_HOLD_S)
+        return;
+    last = now;
+
+    wd_expect(NET_CMD_S); /* system() has no timeout of its own */
+    (void)system("lipc-set-prop -i com.lab126.powerd preventScreenSaver 1 2>/dev/null");
 }

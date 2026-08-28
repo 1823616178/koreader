@@ -23,20 +23,8 @@ void config_defaults(AppConfig *cfg)
     cfg->touch_swap_xy = 0;
     cfg->touch_mirror_x = 0;
     cfg->touch_mirror_y = 0;
-    cfg->idle_timeout_s = CONFIG_IDLE_TIMEOUT_DEFAULT;
     cfg->wifi_auto_off = CONFIG_WIFI_AUTO_OFF_DEFAULT;
     cfg->auto_refresh_min = CONFIG_AUTO_REFRESH_DEFAULT;
-}
-
-int config_clamp_idle_timeout(int secs)
-{
-    if (secs <= 0)
-        return 0; /* 0 = unlimited: the idle timer is off */
-    if (secs < CONFIG_IDLE_TIMEOUT_MIN)
-        return CONFIG_IDLE_TIMEOUT_MIN;
-    if (secs > CONFIG_IDLE_TIMEOUT_MAX)
-        return CONFIG_IDLE_TIMEOUT_MAX;
-    return secs;
 }
 
 int config_clamp_auto_refresh(int mins)
@@ -158,8 +146,6 @@ int config_load(AppConfig *cfg, const char *path)
             cfg->touch_mirror_x = atoi(value) ? 1 : 0;
         } else if (strcmp(key, "touch_mirror_y") == 0) {
             cfg->touch_mirror_y = atoi(value) ? 1 : 0;
-        } else if (strcmp(key, "idle_timeout_s") == 0) {
-            cfg->idle_timeout_s = config_clamp_idle_timeout(atoi(value));
         } else if (strcmp(key, "wifi_auto_off") == 0) {
             cfg->wifi_auto_off = atoi(value) ? 1 : 0;
         } else if (strcmp(key, "auto_refresh_min") == 0) {
@@ -183,7 +169,6 @@ int config_save(const AppConfig *cfg, const char *path)
     fprintf(f, "touch_swap_xy=%d\n", cfg->touch_swap_xy);
     fprintf(f, "touch_mirror_x=%d\n", cfg->touch_mirror_x);
     fprintf(f, "touch_mirror_y=%d\n", cfg->touch_mirror_y);
-    fprintf(f, "idle_timeout_s=%d\n", cfg->idle_timeout_s);
     fprintf(f, "wifi_auto_off=%d\n", cfg->wifi_auto_off);
     fprintf(f, "auto_refresh_min=%d\n", cfg->auto_refresh_min);
     if (fclose(f) != 0)

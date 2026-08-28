@@ -16,10 +16,14 @@ void ui_destroy(Ui *ui);
 /* Full dashboard redraw (everything drawn with no_refresh); caller issues one fbink_refresh_rect.
  * host: title-bar subtitle (may be NULL -> "未配置").
  * status_state: "连接中" | "失败" | "已连接"; status_detail: url or error text; loading: 0/1.
- * wifi_state: 1 connected (dark dot), 0 off (gray dot), -1 unknown (no badge). */
+ * wifi_state: 1 connected (dark dot), 0 off (gray dot), -1 unknown (no badge).
+ * ssid: sanitized SSID shown instead of the "WiFi" label when non-empty.
+ * batt_pct: 0-100, out of range -> no battery text; batt_charging: 1 shows
+ * "充电 N%", 0/other "N%". All three are sampled by the caller at render
+ * points only -- drawing them adds no wakeups on the e-ink device. */
 void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
                        const char *status_state, const char *status_detail, int loading,
-                       int wifi_state);
+                       int wifi_state, const char *ssid, int batt_pct, int batt_charging);
 
 /* Hit-test the bottom button row (screen-space tap coords). Disabled buttons return UI_ACTION_NONE. */
 UiAction ui_hit_button(const Ui *ui, int x, int y);

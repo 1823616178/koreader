@@ -31,6 +31,9 @@ restore_framework() {
     killall -CONT awesome cvm 2>/dev/null
     lipc-set-prop com.lab126.pillow disableEnablePillow enable 2>/dev/null
     lipc-set-prop -i com.lab126.powerd preventScreenSaver 0 2>/dev/null
+    # Release the kernel wake lock aiquota.sh grabbed (harmless when none is
+    # held), so the framework gets its normal suspend/screensaver back.
+    echo aiquota > /sys/power/wake_unlock 2>/dev/null
     if [ "$aq_frozen" = 1 ] && [ -r "$AIQUOTA_FB_DUMP" ]; then
         cat "$AIQUOTA_FB_DUMP" > /dev/fb0
     fi

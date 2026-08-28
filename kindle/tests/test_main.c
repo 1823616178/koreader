@@ -185,7 +185,6 @@ static void test_config_roundtrip(void)
     config_defaults(&cfg);
     CHECK(strcmp(cfg.api_url, "http://123.161.179.32:46927/api/usage") == 0);
     CHECK(cfg.touch_swap_xy == 0 && cfg.touch_mirror_x == 0 && cfg.touch_mirror_y == 0);
-    CHECK(cfg.idle_timeout_s == CONFIG_IDLE_TIMEOUT_DEFAULT);
     CHECK(cfg.wifi_auto_off == CONFIG_WIFI_AUTO_OFF_DEFAULT);
     CHECK(cfg.auto_refresh_min == CONFIG_AUTO_REFRESH_DEFAULT);
 
@@ -199,7 +198,6 @@ static void test_config_roundtrip(void)
     cfg.touch_swap_xy = 1;
     cfg.touch_mirror_x = 1;
     cfg.touch_mirror_y = 0;
-    cfg.idle_timeout_s = 900;
     cfg.wifi_auto_off = 0;
     cfg.auto_refresh_min = 15;
     CHECK(config_save(&cfg, path) == 0);
@@ -210,17 +208,8 @@ static void test_config_roundtrip(void)
     CHECK(back.touch_swap_xy == 1);
     CHECK(back.touch_mirror_x == 1);
     CHECK(back.touch_mirror_y == 0);
-    CHECK(back.idle_timeout_s == 900);
     CHECK(back.wifi_auto_off == 0);
     CHECK(back.auto_refresh_min == 15);
-
-    /* Idle timeout: [MIN, MAX]; non-positive disables it entirely -- the app
-     * then only leaves via 关闭, so this is an explicit power trade-off. */
-    CHECK(config_clamp_idle_timeout(0) == 0);
-    CHECK(config_clamp_idle_timeout(-5) == 0);
-    CHECK(config_clamp_idle_timeout(1) == CONFIG_IDLE_TIMEOUT_MIN);
-    CHECK(config_clamp_idle_timeout(999999) == CONFIG_IDLE_TIMEOUT_MAX);
-    CHECK(config_clamp_idle_timeout(120) == 120);
 
     /* Auto-refresh: non-positive is "off", anything above the cap saturates. */
     CHECK(config_clamp_auto_refresh(0) == 0);
@@ -246,26 +235,32 @@ static void test_config_roundtrip(void)
         CHECK(back.auto_refresh_min == CONFIG_AUTO_REFRESH_MAX);
     }
 
-    /* wifi_auto_off=0 in text parses as off even with junk values; idle 0
-     * (and junk, same atoi result) means the idle timer is off entirely. */
+    /* Junk values parse as off; the legacy idle_timeout_s key from older
+     * builds is just an unknown key now and must load (and roundtrip-drop)
+     * without touching anything. */
     f = fopen(path, "w");
     CHECK(f != NULL);
     if (f) {
-        fputs("wifi_auto_off=abc\nauto_refresh_min=-3\nidle_timeout_s=abc\n", f);
+        fputs("wifi_auto_off=abc\nauto_refresh_min=-3\nidle_timeout_s=60\n", f);
         fclose(f);
         config_defaults(&back);
         CHECK(config_load(&back, path) == 0);
         CHECK(back.wifi_auto_off == 0); /* atoi("abc")==0 -> false -> 0 */
         CHECK(back.auto_refresh_min == 0);
-        CHECK(back.idle_timeout_s == 0);
 
-        /* Unlimited roundtrips: saved 0 loads back as 0. */
-        cfg.idle_timeout_s = config_clamp_idle_timeout(0);
-        CHECK(cfg.idle_timeout_s == 0);
-        CHECK(config_save(&cfg, path) == 0);
-        config_defaults(&back);
-        CHECK(config_load(&back, path) == 0);
-        CHECK(back.idle_timeout_s == 0);
+        CHECK(config_save(&back, path) == 0);
+        f = fopen(path, "r");
+        CHECK(f != NULL);
+        if (f) {
+            char filebuf[512];
+
+            CHECK(fgets(filebuf, sizeof(filebuf), f) != NULL);
+            CHECK(strstr(filebuf, "api_url=") == filebuf);
+            /* The stale key is dropped on save, not carried forward. */
+            while (fgets(filebuf, sizeof(filebuf), f) != NULL)
+                CHECK(strstr(filebuf, "idle_timeout_s") == NULL);
+            fclose(f);
+        }
     }
 }
 
@@ -661,6 +656,40 @@ static void test_net_ensure_wifi_no_lipc(void)
     net_release_wifi();
 }
 
+static void test_net_sanitize_ssid(void)
+{
+    char s[64];
+
+    /* Plain ASCII passes through untouched. */
+    strcpy(s, "HomeNet");
+    net_sanitize_ssid(s);
+    CHECK(strcmp(s, "HomeNet") == 0);
+
+    /* Surrounding whitespace is trimmed (iw lines end with \n). */
+    strcpy(s, "  spaced  ");
+    net_sanitize_ssid(s);
+    CHECK(strcmp(s, "spaced") == 0);
+
+    /* Non-ASCII bytes cut the name: the subset font has no glyphs for them,
+     * and a truncated ASCII head beats tofu boxes. */
+    strcpy(s, "caf\xC3\xA9 123"); /* "café 123": é is 2 UTF-8 bytes */
+    net_sanitize_ssid(s);
+    CHECK(strcmp(s, "caf") == 0);
+
+    strcpy(s, "\xE4\xB8\xAD\xE6\x96\x87"); /* CJK-only name -> nothing usable */
+    net_sanitize_ssid(s);
+    CHECK(s[0] == '\0');
+
+    strcpy(s, "\n\t");
+    net_sanitize_ssid(s);
+    CHECK(s[0] == '\0');
+
+    /* Hidden SSID: "SSID:" with an empty value stays empty. */
+    strcpy(s, "");
+    net_sanitize_ssid(s);
+    CHECK(s[0] == '\0');
+}
+
 /* --- input_wait_tap harness -------------------------------------------------
  * input_wait_tap is blocking, so each case runs in a forked child with an
  * alarm(2) watchdog: the full event stream is written into a pipe up front
@@ -804,10 +833,11 @@ static void test_input_wait_tap(void)
     CHECK(tap_detected(tap_stale_pos, sizeof(tap_stale_pos) / sizeof(tap_stale_pos[0]), 600, 800) == 1);
 }
 
-/* The idle timeout is what releases the frozen framework when the user walks
- * away, so it must fire on a silent-but-open device -- not only on EOF. The
- * write end stays open in the parent: without a timeout this would hang until
- * the alarm kills the child. */
+/* The timeout path must fire on a silent-but-open device, not only on EOF:
+ * with the idle exit gone, the auto-refresh tick and every bounded chunk of
+ * the parked tap-wait are built on exactly this behaviour. The write end
+ * stays open in the parent: without a timeout this would hang until the
+ * alarm kills the child. */
 static void test_input_wait_tap_timeout(void)
 {
     AppConfig cfg;
@@ -893,6 +923,7 @@ int main(void)
     RUN(test_input_wait_tap);
     RUN(test_input_wait_tap_timeout);
     RUN(test_wd_should_beat);
+    RUN(test_net_sanitize_ssid);
     RUN(test_net_ensure_wifi_no_lipc);
 
     if (failures == 0) {

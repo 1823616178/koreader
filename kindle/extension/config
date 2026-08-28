@@ -8,12 +8,11 @@ touch_swap_xy=0
 touch_mirror_x=0
 touch_mirror_y=0
 
-# Idle auto-exit: seconds without a tap before the app closes itself and gives
-# the framework back. Clamped to 60..3600; 0 disables auto-exit.
-idle_timeout_s=600
-
 # Release WiFi after a fetch only when this app raised it (0/1).
 wifi_auto_off=1
 
 # Periodic refresh interval in minutes. 0 disables; valid range is 1..60.
+# The app never exits on its own; between ticks it parks with the CPU idle,
+# the radio off and the e-ink static. Cycles that fetch identical data with
+# an unchanged battery badge skip the screen flash entirely.
 auto_refresh_min=0

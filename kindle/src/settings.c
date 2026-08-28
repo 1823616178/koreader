@@ -1,9 +1,9 @@
 /* Settings page: one full-screen form for the config keys that matter on
- * device (api_url, wifi_auto_off, auto_refresh_min, idle_timeout_s). Layout
- * and feedback follow keypad.c -- framed rows, invert-flash on press, DU
- * refreshes for value updates, one GC16 per page transition issued by the
- * caller. Value strings are rebuilt from the working copy after every change,
- * so the page can never drift from the state it will commit. */
+ * device (api_url, wifi_auto_off, auto_refresh_min). Layout and feedback
+ * follow keypad.c -- framed rows, invert-flash on press, DU refreshes for
+ * value updates, one GC16 per page transition issued by the caller. Value
+ * strings are rebuilt from the working copy after every change, so the page
+ * can never drift from the state it will commit. */
 #define _POSIX_C_SOURCE 200112L
 #define _DEFAULT_SOURCE /* usleep under -std=c99 */
 
@@ -14,7 +14,7 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { ROW_URL = 0, ROW_WIFI, ROW_REFRESH, ROW_IDLE, ROW_COUNT };
+enum { ROW_URL = 0, ROW_WIFI, ROW_REFRESH, ROW_COUNT };
 
 struct Settings {
     Ui *ui;                 /* non-owning: geometry, font, batch-draw config */
@@ -31,7 +31,6 @@ static const struct {
     { "接口地址" },
     { "刷新后关WiFi" },
     { "自动刷新" },
-    { "自动退出" },
 };
 
 /* Authority part of api_url ("http://h:8123/api/usage" -> "h:8123"), shown as
@@ -68,11 +67,6 @@ static void refresh_values(Settings *s)
                  s->work.auto_refresh_min);
     else
         snprintf(s->val_text[ROW_REFRESH], sizeof(s->val_text[0]), "%s", "关闭");
-    if (s->work.idle_timeout_s > 0)
-        snprintf(s->val_text[ROW_IDLE], sizeof(s->val_text[0]), "%d 秒",
-                 s->work.idle_timeout_s);
-    else
-        snprintf(s->val_text[ROW_IDLE], sizeof(s->val_text[0]), "%s", "无限");
 }
 
 Settings *settings_create(Ui *ui, const AppConfig *cfg)
@@ -234,19 +228,13 @@ SettingsHit settings_handle_tap(Settings *s, int fbfd, int x, int y)
     }
 
     {
-        int idx = (r == &s->row_rect[ROW_URL])       ? ROW_URL
-                : (r == &s->row_rect[ROW_REFRESH])   ? ROW_REFRESH
-                                                     : ROW_IDLE;
+        int idx = (r == &s->row_rect[ROW_URL]) ? ROW_URL : ROW_REFRESH;
 
         flash_press(s, fbfd, r); /* blacked out: repaint + refresh to restore */
         draw_row(s, idx);
         ui_refresh(fbfd, r, WFM_DU);
 
-        if (idx == ROW_URL)
-            return SET_HIT_EDIT_URL;
-        if (idx == ROW_REFRESH)
-            return SET_HIT_EDIT_REFRESH;
-        return SET_HIT_EDIT_IDLE;
+        return idx == ROW_URL ? SET_HIT_EDIT_URL : SET_HIT_EDIT_REFRESH;
     }
 }
 
@@ -258,11 +246,6 @@ const char *settings_url(const Settings *s)
 int settings_refresh_min(const Settings *s)
 {
     return s ? s->work.auto_refresh_min : 0;
-}
-
-int settings_idle_s(const Settings *s)
-{
-    return s ? s->work.idle_timeout_s : CONFIG_IDLE_TIMEOUT_DEFAULT;
 }
 
 int settings_set_url(Settings *s, const char *normalized_url)
@@ -292,20 +275,6 @@ int settings_set_refresh_min(Settings *s, int minutes)
     return changed;
 }
 
-int settings_set_idle_s(Settings *s, int seconds)
-{
-    int changed;
-
-    if (!s)
-        return 0;
-    seconds = config_clamp_idle_timeout(seconds);
-    changed = s->work.idle_timeout_s != seconds;
-    s->work.idle_timeout_s = seconds;
-    if (changed)
-        refresh_values(s);
-    return changed;
-}
-
 int settings_commit(Settings *s, AppConfig *cfg)
 {
     int changed;
@@ -316,7 +285,6 @@ int settings_commit(Settings *s, AppConfig *cfg)
               s->work.touch_swap_xy != s->orig.touch_swap_xy ||
               s->work.touch_mirror_x != s->orig.touch_mirror_x ||
               s->work.touch_mirror_y != s->orig.touch_mirror_y ||
-              s->work.idle_timeout_s != s->orig.idle_timeout_s ||
               s->work.wifi_auto_off != s->orig.wifi_auto_off ||
               s->work.auto_refresh_min != s->orig.auto_refresh_min;
     if (changed)

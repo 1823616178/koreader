@@ -380,29 +380,58 @@ static void draw_info_slot(const Ui *ui, int slot, int y0,
     draw_info_card(ui, x, y, snap, status_state, status_detail);
 }
 
-/* WiFi badge, top-right of the title bar: a small state dot + "WiFi" label.
- * Dark dot = radio connected; gray dot = off (the usual sight with
- * wifi_auto_off on -- the fetch is over, the radio went back to sleep).
- * state < 0 draws nothing: before the first probe there is nothing to say. */
-static void draw_wifi_badge(const Ui *ui, int state)
+/* Title-bar right corner, drawn right to left: battery percent (with a
+ * "充电" prefix on wall power), then the WiFi badge -- state dot + label,
+ * where the label is the current SSID when we have one and "WiFi" otherwise.
+ * Everything comes from samples the caller took for this very render; the
+ * badge adds no probes, timers or wakeups of its own.
+ * Battery out of range and state < 0 each draw nothing: before the first
+ * probe (or off-device) there is nothing to say. */
+static void draw_status_badges(const Ui *ui, int wifi_state, const char *ssid,
+                               int batt_pct, int batt_charging)
 {
-    const char *label = "WiFi";
     const int dot = ui_scale(ui, 6);
     const int gap = ui_scale(ui, 5);
+    const int y = ui_scale(ui, 18);
+    char text[48];
     int tw = 0, th = 0;
-    int x, y;
+    int x = ui->w - ui->h_padding;
 
-    if (state < 0)
-        return;
-    if (ui_measure(ui, label, ui->px_detail, &tw, &th) != 0 || tw <= 0)
-        return;
+    if (batt_pct >= 0 && batt_pct <= 100) {
+        snprintf(text, sizeof(text),
+                 batt_charging == 1 ? "充电 %d%%" : "%d%%", batt_pct);
+        if (ui_measure(ui, text, ui->px_detail, &tw, &th) == 0 && tw > 0) {
+            x -= tw;
+            ui_text(ui, text, ui->px_detail, x, y, tw, th,
+                    UI_ALIGN_LEFT, FG_BLACK, 0);
+            x -= gap;
+        }
+    }
 
-    x = ui->w - ui->h_padding - tw - gap - dot;
-    y = ui_scale(ui, 18);
+    if (wifi_state < 0)
+        return;
+    snprintf(text, sizeof(text), "%s",
+             (ssid && *ssid) ? ssid : "WiFi");
+    if (ui_measure(ui, text, ui->px_detail, &tw, &th) != 0 || th <= 0)
+        return;
+    /* Cap the label so a long SSID cannot run over the battery figure or
+     * the centered title; ui_text truncates with an ellipsis inside the box. */
+    {
+        int cap = ui->w * 3 / 10;
+        int box_w;
+
+        if (cap > x - dot - gap)
+            cap = x - dot - gap;
+        if (cap < 1)
+            return;
+        box_w = tw < cap ? tw : cap;
+        x -= box_w;
+        ui_text(ui, text, ui->px_detail, x, y, box_w, th,
+                UI_ALIGN_RIGHT, wifi_state > 0 ? FG_BLACK : FG_GRAY8, 0);
+        x -= gap + dot;
+    }
     ui_fill(ui, x, y + (th - dot) / 2, dot, dot,
-            state > 0 ? UI_INK_BLACK : UI_INK_GRAY);
-    ui_text(ui, label, ui->px_detail, x + dot + gap, y, tw, th,
-            UI_ALIGN_LEFT, state > 0 ? FG_BLACK : FG_GRAY8, 0);
+            wifi_state > 0 ? UI_INK_BLACK : UI_INK_GRAY);
 }
 
 /* TitleBar port (quotapage.lua:257-287): centered title + subtitle, then a 1px
@@ -563,7 +592,7 @@ void ui_destroy(Ui *ui)
 
 void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
                        const char *status_state, const char *status_detail, int loading,
-                       int wifi_state)
+                       int wifi_state, const char *ssid, int batt_pct, int batt_charging)
 {
     int card_count, rows, drawn_h, slack, y0, slot = 0;
 
@@ -573,7 +602,7 @@ void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
     fbink_cls(ui->fbfd, &ui->cfg_draw, NULL, false); /* white canvas, no refresh */
 
     draw_title_bar(ui, host);
-    draw_wifi_badge(ui, wifi_state);
+    draw_status_badges(ui, wifi_state, ssid, batt_pct, batt_charging);
 
     /* One card per ordinary provider, two for AGY, plus the always-visible
      * connection card. Disabled providers are omitted and the remaining

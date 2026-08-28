@@ -32,6 +32,11 @@ fi
 cat /dev/fb0 > /var/tmp/aiquota-fb.dump # 备份当前画面
 lipc-set-prop com.lab126.pillow disableEnablePillow disable
 lipc-set-prop -i com.lab126.powerd preventScreenSaver 1
+# 内核级唤醒锁：部分固件的 powerd 会在自己的空闲计时到点后无视
+# preventScreenSaver 照样挂起，醒来即锁屏。拿着 wakelock 彻底挡住
+# 自动挂起；文件不存在时静默跳过（应用侧还有周期续期作第二道防线）。
+# 退出路径统一经 restore_framework 释放，见 bin/restore.sh。
+echo aiquota > /sys/power/wake_lock 2>/dev/null
 killall -STOP awesome cvm
 usleep 250000
 

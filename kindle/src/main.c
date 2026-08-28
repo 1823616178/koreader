@@ -4,7 +4,10 @@
  * first paint, then serve taps on the refresh / settings / close buttons.
  *
  * State machine: LOADING -> READY | ERROR, plus a SETTINGS sub-mode entered
- * from READY/ERROR (which itself opens KEYPAD editors for its fields).
+ * from READY/ERROR (which itself opens KEYPAD editors for its fields). The
+ * app never exits on its own: it parks on a blocked poll (CPU idle, radio
+ * off, e-ink static) until the 关闭 button, a lost touch device or the
+ * watchdog layers end it; the only timer is the optional auto-refresh tick.
  * Modes: no args = normal run; --demo renders embedded demo data without
  * touching the network; --dump-state prints FBInkState; --calibrate derives
  * the touch transform over SSH. A clean exit returns 0 and the wrapper script
@@ -136,41 +139,50 @@ static void install_signal_handlers(void)
     install_fatal_handler(SIGTERM, &sa);
 }
 
-/* Upper bound of one poll segment when the idle timer is off (0): the
- * heartbeat contract forbids unbounded announcements, so "wait forever" is
- * built from bounded segments with the watchdog re-armed before each one.
- * Segment length trades wedge-detection latency against a tiny gesture risk:
- * a touch whose down and up straddle a segment boundary is dropped (state
- * self-recovers on the next touch). 5 min puts worst-case wedged-app
- * detection at ~7 min here while the straddle odds are ~1 in 50 000 taps. */
+/* Upper bound of one poll segment while waiting for taps: the heartbeat
+ * contract forbids unbounded announcements, so every wait is built from
+ * bounded segments with the watchdog re-armed before each one. Segment length
+ * trades wedge-detection latency against a tiny gesture risk: a touch whose
+ * down and up straddle a segment boundary is dropped (state self-recovers on
+ * the next touch). 5 min puts worst-case wedged-app detection at ~7 min here
+ * while the straddle odds are ~1 in 50 000 taps. */
 #define TAP_WAIT_CHUNK_S 300
 
-/* One tap wait, wrapped in the heartbeat contract (see watchdog.h): announce
- * the whole idle budget before blocking, then drop back to the short local-
- * work bound. With this, the app has no unbounded wait left anywhere, which
- * is what lets watchdog.sh read a missing beat as "wedged" rather than "the
- * user put the Kindle down".
- * timeout_s <= 0 means unlimited (idle timer off): polls in TAP_WAIT_CHUNK_S
- * segments forever, so rc==1 never escapes -- only taps or device errors do.
- * Returns 0 tap / 1 timeout / -1 device error, like input_wait_tap. */
-static int wait_tap_for(int fd, int scr_w, int scr_h, const AppConfig *cfg,
-                        int timeout_s, int *x, int *y)
+/* One tap wait, wrapped in the heartbeat contract (see watchdog.h): each
+ * segment announces its own bound before blocking, then the short local-work
+ * bound takes over. With this, the app has no unbounded wait left anywhere,
+ * which is what lets watchdog.sh read a missing beat as "wedged" rather than
+ * "the user put the Kindle down".
+ * deadline is an absolute wall-clock second (0 = none). The call returns 1
+ * when it passes -- the auto-refresh tick -- and keeps waiting through mere
+ * segment expiries otherwise, so the app parks on one blocked poll at a time
+ * and costs no CPU while it sits there. Returns 0 tap / 1 tick / -1 error,
+ * like input_wait_tap. */
+static int wait_tap_until(int fd, int scr_w, int scr_h, const AppConfig *cfg,
+                          long deadline, int *x, int *y)
 {
-    int rc;
-
-    if (timeout_s > 0) {
-        wd_expect(timeout_s + WD_SLACK_S);
-        rc = input_wait_tap(fd, scr_w, scr_h, cfg, timeout_s, x, y);
-        wd_expect(WD_STEP_S);
-        return rc;
-    }
-
     for (;;) {
-        wd_expect(TAP_WAIT_CHUNK_S + WD_SLACK_S);
-        rc = input_wait_tap(fd, scr_w, scr_h, cfg, TAP_WAIT_CHUNK_S, x, y);
+        int chunk = TAP_WAIT_CHUNK_S;
+        int rc;
+
+        if (deadline > 0) {
+            long left = deadline - (long)time(NULL);
+
+            if (left <= 0)
+                return 1;
+            if (left < chunk)
+                chunk = (int)left;
+        }
+        /* Every chunk boundary also refreshes the screensaver hold (the
+         * call rate-limits itself): the parked dashboard must never roll
+         * into the lock screen, whatever powerd thinks of the hold the
+         * wrapper armed at startup. */
+        net_hold_screensaver();
+        wd_expect(chunk + WD_SLACK_S);
+        rc = input_wait_tap(fd, scr_w, scr_h, cfg, chunk, x, y);
         wd_expect(WD_STEP_S);
         if (rc != 1)
-            return rc; /* tap or device error; chunk expiry just re-arms */
+            return rc; /* tap or device error; a segment expiry re-arms */
     }
 }
 
@@ -218,27 +230,68 @@ static void full_refresh(int fbfd)
     fbink_refresh(fbfd, 0, 0, 0, 0, &rcfg);
 }
 
+/* --- what the panel currently shows ---------------------------------------
+ * The app never exits on its own anymore, so most of its life is a parked
+ * wait: CPU blocked in poll, radio down, e-ink holding a static image for
+ * free. The one recurring cost left is the auto-refresh cycle, and a cycle
+ * whose fetch brings back the same data with an unchanged battery badge
+ * does not need the panel to flash at all -- these track the visible frame
+ * well enough to decide that (FNV-1a64 over status + body-or-error text,
+ * plus the title-bar battery figures as painted). */
+static int frame_is_dashboard;        /* a dashboard (not skeleton/page) is up */
+static unsigned long long frame_sig;  /* signature of the painted content */
+static int frame_batt, frame_chg;     /* battery figures as painted */
+
+#define FNV_BASIS 0xcbf29ce484222325ULL
+
+static unsigned long long fnv_add(unsigned long long h, const char *s)
+{
+    if (s) {
+        while (*s) {
+            h ^= (unsigned char)*s++;
+            h *= 0x100000001b3ULL;
+        }
+    }
+    return h;
+}
+
+static unsigned long long frame_sig_of(const char *status, const char *src)
+{
+    return fnv_add(fnv_add(FNV_BASIS, status), src);
+}
+
 /* LOADING paint: empty skeleton + "connecting" card, like quotapage.lua's
  * onShow drawing the skeleton before fetch() runs. */
 static void paint_loading(int fbfd, Ui *ui, const char *host, const char *api_url)
 {
     QuotaSnapshot empty;
+    char ssid[33]; /* 802.11 SSIDs cap at 32 octets */
+    int batt, chg;
 
     quota_empty_snapshot(&empty);
-    ui_draw_dashboard(ui, &empty, host, "连接中", api_url, 1, net_wifi_state());
+    net_battery(&batt, &chg);
+    net_wifi_ssid(ssid, sizeof(ssid));
+    ui_draw_dashboard(ui, &empty, host, "连接中", api_url, 1,
+                      net_wifi_state(), ssid, batt, chg);
     full_refresh(fbfd);
+    frame_is_dashboard = 0; /* whatever lands next must be painted in full */
 }
 
 /* One fetch+paint cycle: WiFi check, HTTP GET, JSON parse, dashboard redraw.
  * A successful parse replaces *snap; on error the last good snapshot is kept
  * (or an empty one when nothing ever succeeded), and detail carries the URL
  * or the error text. release_wifi: hand the radio back after the attempt
- * (only effective when net.c actually raised it). Returns ST_READY/ST_ERROR. */
+ * (only effective when net.c actually raised it). Returns ST_READY/ST_ERROR.
+ * The repaint at the end is skipped when the panel already shows exactly
+ * this content (same signature, same battery badge and a dashboard rather
+ * than a skeleton is up): an auto-refresh cycle that changed nothing then
+ * costs the radio wake-up and nothing else -- no e-ink flash. */
 static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
                     QuotaSnapshot *snap, int *have_good, int demo,
                     char *detail, size_t detail_size, int release_wifi)
 {
     QuotaSnapshot fresh;
+    unsigned long long sig;
     int st = ST_READY;
 
     if (demo) {
@@ -249,6 +302,7 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
             *have_good = 1;
         }
         snprintf(detail, detail_size, "demo");
+        sig = frame_sig_of("已连接", DEMO_JSON);
     } else {
         int status = 0;
         char errbuf[256];
@@ -259,21 +313,26 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
             /* Checked every cycle: WiFi may drop while the app is open. */
             st = ST_ERROR;
             snprintf(detail, detail_size, "WiFi 未连接");
+            sig = frame_sig_of("失败", detail);
         } else {
             body = http_get(api_url, &status, errbuf, sizeof(errbuf));
             if (!body) {
                 st = ST_ERROR;
                 snprintf(detail, detail_size, "%s", errbuf);
+                sig = frame_sig_of("失败", detail);
             } else if (status != 200) {
                 st = ST_ERROR;
                 snprintf(detail, detail_size, "HTTP %d", status);
+                sig = frame_sig_of("失败", detail);
             } else if (quota_parse_snapshot(body, &fresh) != 0) {
                 st = ST_ERROR;
                 snprintf(detail, detail_size, "响应不是有效 JSON");
+                sig = frame_sig_of("失败", detail);
             } else {
                 *snap = fresh;
                 *have_good = 1;
                 snprintf(detail, detail_size, "%s", api_url);
+                sig = frame_sig_of("已连接", body);
             }
             free(body); /* free(NULL) is fine */
         }
@@ -287,8 +346,30 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
 
     if (st == ST_ERROR && !*have_good)
         quota_empty_snapshot(snap);
-    ui_draw_dashboard(ui, snap, host, st == ST_ERROR ? "失败" : "已连接",
-                      detail, 0, net_wifi_state());
+    {
+        /* Sampled once per cycle, after the radio decision above: with
+         * wifi_auto_off the connection is already down here, so the SSID
+         * probe inside net_wifi_ssid spawns nothing and the badge shows
+         * the plain gray "WiFi" dot -- exactly the state the radio is in. */
+        char ssid[33];
+        int batt, chg;
+
+        net_battery(&batt, &chg);
+        net_wifi_ssid(ssid, sizeof(ssid));
+        if (frame_is_dashboard && sig == frame_sig &&
+            batt == frame_batt && chg == frame_chg) {
+            /* Identical cycle: keep the frame, skip the flash. The battery
+             * badge can lag one cycle at worst; the first cycle where
+             * anything moves repaints it. */
+            return st;
+        }
+        ui_draw_dashboard(ui, snap, host, st == ST_ERROR ? "失败" : "已连接",
+                          detail, 0, net_wifi_state(), ssid, batt, chg);
+        frame_is_dashboard = 1;
+        frame_sig = sig;
+        frame_batt = batt;
+        frame_chg = chg;
+    }
     full_refresh(fbfd);
     return st;
 }
@@ -347,6 +428,16 @@ static void dump_state(const FBInkState *st)
     printf("has_color_panel=%d\n", st->has_color_panel);
     printf("pixel_format=%d\n", st->pixel_format);
     printf("can_wait_for_submission=%d\n", st->can_wait_for_submission);
+
+    /* Not FBInkState, but the same job: install.md §4.1 checks these before
+     * the first real launch. */
+    {
+        int batt = -1, chg = -1;
+
+        net_battery(&batt, &chg);
+        printf("battery_level=%d\n", batt);
+        printf("battery_charging=%d\n", chg);
+    }
 }
 
 /* Small black crosshair centered on (x, y), refreshed with fast WFM_DU. */
@@ -440,8 +531,11 @@ static int run_calibrate(int fbfd, int scr_w, int scr_h, int input_fd)
     fflush(stdout); /* the next read blocks; make sure prompts are out */
 
     for (i = 0; i < 4; i++) {
-        int wr = wait_tap_for(input_fd, scr_w, scr_h, &ccfg,
-                              ccfg.idle_timeout_s, &px[i], &py[i]);
+        /* Fixed 600 s budget per corner: a session nobody finishes must not
+         * pin the screen forever now that the app has no idle exit to lean
+         * on. Run over SSH, this is also where the operator watches. */
+        int wr = wait_tap_until(input_fd, scr_w, scr_h, &ccfg,
+                                (long)time(NULL) + 600, &px[i], &py[i]);
 
         if (wr != 0) {
             fprintf(stderr, "aiquota: %s\n",
@@ -500,6 +594,7 @@ int main(int argc, char **argv)
     int fbfd = -1, input_fd = -1;
     int scr_w = 0, scr_h = 0;
     int st = ST_LOADING;
+    int auto_cycle = 0; /* the LOADING about to run was tick-driven */
     int rc = 0;
 
     /* --- arguments ------------------------------------------------------ */
@@ -596,8 +691,19 @@ int main(int argc, char **argv)
             have_good = 1;
         }
         snprintf(detail, sizeof(detail), "demo");
-        ui_draw_dashboard(ui, &snap, host, "已连接", detail, 0,
-                          net_wifi_state());
+        {
+            char ssid[33];
+            int batt, chg;
+
+            net_battery(&batt, &chg); /* real figures; network untouched */
+            net_wifi_ssid(ssid, sizeof(ssid));
+            ui_draw_dashboard(ui, &snap, host, "已连接", detail, 0,
+                              net_wifi_state(), ssid, batt, chg);
+            frame_is_dashboard = 1;
+            frame_sig = frame_sig_of("已连接", DEMO_JSON);
+            frame_batt = batt;
+            frame_chg = chg;
+        }
         full_refresh(fbfd);
         if (input_fd < 0) {
             rc = 0; /* rendered; nothing to interact with */
@@ -607,51 +713,40 @@ int main(int argc, char **argv)
     }
 
     /* --- event loop ------------------------------------------------------- */
+    /* auto_cycle: the LOADING about to run was timer-driven -- an auto tick
+     * fetches behind the frame already on screen instead of flashing the
+     * connecting skeleton nobody is there to watch. */
     for (;;) {
         int x = 0, y = 0;
         int wr;
-        int wait_s;
+        long deadline;
         UiAction action;
 
         if (st == ST_LOADING) {
             wd_expect(WD_STEP_S); /* net.c and http.c re-arm per blocking phase */
-            paint_loading(fbfd, ui, host, cfg.api_url);
+            if (!auto_cycle)
+                paint_loading(fbfd, ui, host, cfg.api_url);
             st = do_fetch(fbfd, ui, cfg.api_url, host, &snap, &have_good,
                           mode == MODE_DEMO, detail, sizeof(detail),
                           cfg.wifi_auto_off);
             last_fetch = time(NULL); /* auto-refresh counts from this data */
+            auto_cycle = 0;
         }
 
-        /* READY/ERROR: wait for a tap on the button row. The poll bound is
-         * whichever comes first -- the idle deadline (0 = unlimited) or the
-         * next auto-refresh. Taps made while a blocking fetch runs stay
-         * queued in the kernel evdev buffer and are hit-tested here against
-         * the NEW screen. */
-        wait_s = cfg.idle_timeout_s;
-        if (cfg.auto_refresh_min > 0) {
-            long until = last_fetch + (long)cfg.auto_refresh_min * 60 -
-                         (long)time(NULL);
-
-            if (until <= 0) {
-                st = ST_LOADING;
-                continue;
-            }
-            if (wait_s <= 0 || until < wait_s)
-                wait_s = (int)until;
-        }
-
-        wr = wait_tap_for(input_fd, scr_w, scr_h, &cfg, wait_s, &x, &y);
+        /* READY/ERROR: park on one blocked poll until the next tap or,
+         * with auto-refresh on, the tick -- the only deadline left now
+         * that the idle exit is gone. Taps queued in the kernel evdev
+         * buffer while a fetch runs stay hit-testable against the NEW
+         * screen. An overdue deadline (e.g. time spent in settings)
+         * returns 1 immediately and fetches right away. */
+        deadline = cfg.auto_refresh_min > 0
+                       ? (long)last_fetch + (long)cfg.auto_refresh_min * 60
+                       : 0;
+        wr = wait_tap_until(input_fd, scr_w, scr_h, &cfg, deadline, &x, &y);
         if (wr > 0) {
-            /* Timeout. With auto-refresh on, let the loop top decide: it
-             * turns an overdue refresh into a fetch and otherwise waits
-             * again (poll can wake a hair early; re-checking the clock
-             * there avoids closing on a rounding artifact). An auto-refresh
-             * never feeds the idle timer, so with a finite idle timeout a
-             * Kindle put face-up still closes the app on schedule; with
-             * idle off, only 关闭 ends the session here. */
-            if (cfg.auto_refresh_min > 0)
-                continue;
-            break; /* idle: close ourselves so the framework comes back */
+            auto_cycle = 1;
+            st = ST_LOADING;
+            continue;
         }
         if (wr < 0) {
             fprintf(stderr, "aiquota: touch input device lost\n");
@@ -684,13 +779,12 @@ int main(int argc, char **argv)
             full_refresh(fbfd);
 
             while (!done) {
-                wr = wait_tap_for(input_fd, scr_w, scr_h, &cfg,
-                                  cfg.idle_timeout_s, &x, &y);
-                if (wr > 0) {
-                    settings_destroy(sp);
-                    goto out; /* idle: drop edits, release the framework */
-                }
-                if (wr < 0) {
+                /* No deadline: with the idle exit gone, the page waits for a
+                 * tap for as long as it takes. An auto-refresh tick that
+                 * passes while editing is simply skipped -- the main loop
+                 * sees the overdue deadline on return and fetches then. */
+                wr = wait_tap_until(input_fd, scr_w, scr_h, &cfg, 0, &x, &y);
+                if (wr != 0) {
                     fprintf(stderr, "aiquota: touch input device lost\n");
                     settings_destroy(sp);
                     rc = 1;
@@ -720,25 +814,17 @@ int main(int argc, char **argv)
                     if (hit == SET_HIT_EDIT_URL) {
                         snprintf(edit, sizeof(edit), "%s", settings_url(sp));
                         keypad_draw(kp, "接口地址", edit);
-                    } else if (hit == SET_HIT_EDIT_REFRESH) {
+                    } else {
                         snprintf(edit, sizeof(edit), "%d",
                                  settings_refresh_min(sp));
                         keypad_draw(kp, "自动刷新(分钟)", edit);
-                    } else {
-                        snprintf(edit, sizeof(edit), "%d",
-                                 settings_idle_s(sp));
-                        keypad_draw(kp, "自动退出(0=无限)", edit);
                     }
                     full_refresh(fbfd);
 
                     while (kr == 0) {
-                        wr = wait_tap_for(input_fd, scr_w, scr_h, &cfg,
-                                          cfg.idle_timeout_s, &x, &y);
-                        if (wr > 0) {
-                            settings_destroy(sp);
-                            goto out; /* idle: drop edits, release framework */
-                        }
-                        if (wr < 0) {
+                        wr = wait_tap_until(input_fd, scr_w, scr_h, &cfg,
+                                            0, &x, &y);
+                        if (wr != 0) {
                             fprintf(stderr,
                                     "aiquota: touch input device lost\n");
                             settings_destroy(sp);
@@ -755,10 +841,8 @@ int main(int argc, char **argv)
 
                             config_normalize_url(norm, sizeof(norm), edit);
                             url_changed |= settings_set_url(sp, norm);
-                        } else if (hit == SET_HIT_EDIT_REFRESH) {
-                            settings_set_refresh_min(sp, atoi(edit));
                         } else {
-                            settings_set_idle_s(sp, atoi(edit));
+                            settings_set_refresh_min(sp, atoi(edit));
                         }
                     }
                     /* Confirm and cancel both land back on the page, redrawn
@@ -778,9 +862,20 @@ int main(int argc, char **argv)
                 /* New endpoint: keep the confirm-address-refetches semantic. */
                 st = ST_LOADING;
             } else {
+                char ssid[33];
+                int batt, chg;
+
+                net_battery(&batt, &chg);
+                net_wifi_ssid(ssid, sizeof(ssid));
                 ui_draw_dashboard(ui, &snap, host,
                                   st == ST_ERROR ? "失败" : "已连接",
-                                  detail, 0, net_wifi_state());
+                                  detail, 0, net_wifi_state(), ssid, batt, chg);
+                /* Same data and status as the frame before the settings
+                 * page: keep its signature, adopt the fresher battery
+                 * figures so the skip test stays honest. */
+                frame_is_dashboard = 1;
+                frame_batt = batt;
+                frame_chg = chg;
                 full_refresh(fbfd);
             }
         }
