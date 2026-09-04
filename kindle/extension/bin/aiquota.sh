@@ -50,8 +50,10 @@ usleep 250000
 # oom_score_adj 1000 makes the app the OOM killer's first choice: under memory
 # pressure it dies, the trap above fires, and the framework comes back -- an
 # OOM event becomes a clean close instead of a wedged device. The value is
-# inherited across exec, so the subshell sets it for the binary.
+# inherited across exec, so the subshell sets it for the binary. Old kernels
+# only have oom_adj; its ceiling 15 maps to score 1000.
 (
-    printf '%s\n' 1000 > /proc/self/oom_score_adj 2>/dev/null
+    printf '%s\n' 1000 > /proc/self/oom_score_adj 2>/dev/null ||
+        printf '%s\n' 15 > /proc/self/oom_adj 2>/dev/null
     exec "$BIN/aiquota"
 )

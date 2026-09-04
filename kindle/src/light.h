@@ -15,12 +15,20 @@ int light_set_intensity(int n); /* clamp then set; 0 ok, -1 on fail */
 /* [0, max]; max < 1 uses LIGHT_MAX_FALLBACK. */
 int light_clamp(int n, int max);
 
+/* Last positive level successfully set by the user or by an idle restore
+ * (recorded inside light_set_intensity; setting 0 never overwrites it).
+ * 0 = no positive level known yet. Process-local only: it survives across
+ * settings-page sessions within one run, but is never persisted and never
+ * becomes an AppConfig key. */
+int light_last_on(void);
+
 /* Idle frontlight: the parked dashboard's biggest avoidable draw is the LED,
  * so the main loop dims it to 0 after a few idle minutes and restores it on
  * the next touch (or before exit). The remembered level doubles as the
  * "dimmed by us" marker: a light the user turned off never enters it, so a
- * restore can never switch one back on. settings.c seeds its 前光/亮度 rows
- * from the same level, so they re-open at the pre-idle brightness. */
+ * restore can never switch one back on. The settings page's re-open target
+ * comes from light_last_on() instead -- the main loop always restores (and
+ * clears) the idle slot before the settings page can open. */
 int  light_idle_off(void);     /* remember current level, set 0; 1 if dimmed now */
 int  light_idle_restore(void); /* re-apply the remembered level; 1 if restored */
 int  light_idle_level(void);   /* level remembered by idle-off, 0 when none */

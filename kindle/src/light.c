@@ -97,18 +97,36 @@ int light_get_max(void)
     return v;
 }
 
+/* Last positive level this process applied successfully. Written only by
+ * light_set_intensity on a successful set with n > 0, so light_idle_off's
+ * set(0) can never clobber it and light_idle_restore's set(saved) re-seeds
+ * it with exactly the level the settings page should offer next. A hint,
+ * not state: powerd persists the live intensity itself, and this slot stays
+ * process-local on purpose -- never written to the config file. */
+static int user_last_on;
+
 int light_set_intensity(int n)
 {
     int max = light_get_max();
 
     n = light_clamp(n, max);
-    return lipc_set_int("flIntensity", n);
+    if (lipc_set_int("flIntensity", n) != 0)
+        return -1;
+    if (n > 0)
+        user_last_on = n;
+    return 0;
+}
+
+int light_last_on(void)
+{
+    return user_last_on;
 }
 
 /* --- idle dim --------------------------------------------------------------
- * One process-static slot does triple duty: the level to restore, the
- * "dimmed by this logic" marker (non-zero), and the last-on hint the
- * settings page picks up when it opens on a dimmed light. */
+ * One process-static slot does double duty: the level to restore, and the
+ * "dimmed by this logic" marker (non-zero). The settings page's last-on hint
+ * lives in user_last_on instead: the main loop restores (and so clears) the
+ * idle slot before the settings page can open, so it would read 0 here. */
 
 static int idle_saved; /* level to restore; 0 = the light was not dimmed by us */
 

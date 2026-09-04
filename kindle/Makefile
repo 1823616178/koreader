@@ -17,7 +17,7 @@ $(BIN): $(SRCS) $(wildcard src/*.h) third_party/cJSON/cJSON.h third_party/fbink/
 # No -D_DEFAULT_SOURCE on the command line: the sources self-define it, and
 # a command-line define collides with that under -Werror (macro redefined).
 test:
-	gcc -std=c99 -Wall -Wextra -Werror -Isrc -Ithird_party/cJSON \
+	gcc -std=c99 -Wall -Wextra -Werror -Isrc -Ithird_party/cJSON -Ithird_party/fbink \
 	    -o /tmp/aiquota_test tests/test_main.c src/config.c src/quota.c src/http.c \
 	    src/input.c src/net.c src/light.c src/watchdog.c third_party/cJSON/cJSON.c -lpthread
 	/tmp/aiquota_test

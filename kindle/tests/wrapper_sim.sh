@@ -5,12 +5,15 @@
 # restore_framework runs exactly once.
 set -u
 T=/tmp/wrtest
-SRC=/mnt/g/code/koread_ext/kindle/extension/bin
+SRC=$(CDPATH= cd -- "$(dirname -- "$0")/../extension/bin" && pwd)
 rm -rf "$T"; mkdir -p "$T/bin"
 
 cp "$SRC/aiquota.sh" "$SRC/restore.sh" "$T/bin/"
-sed -i "s#^BIN=.*#BIN=$T/bin#; s#/var/tmp/aiquota-fb.dump#$T/fb.dump#g; s#/var/tmp/aiquota.ping#$T/ping#g; s#/dev/fb0#$T/fb0#g" "$T/bin/aiquota.sh"
-sed -i "s#^AIQUOTA_FB_DUMP=.*#AIQUOTA_FB_DUMP=$T/fb.dump#; s#/dev/fb0#$T/fb0#" "$T/bin/restore.sh"
+# wake_lock/wake_unlock become appends (not the device's truncating writes) so
+# the sandbox file line count records exactly how often each was grabbed/
+# released; a plain ">" would hide a double-grab behind the truncation.
+sed -i "s#^BIN=.*#BIN=$T/bin#; s#/var/tmp/aiquota-fb.dump#$T/fb.dump#g; s#/var/tmp/aiquota.ping#$T/ping#g; s#/dev/fb0#$T/fb0#g; s#> /sys/power/wake_lock#>> $T/wake_lock#" "$T/bin/aiquota.sh"
+sed -i "s#^AIQUOTA_FB_DUMP=.*#AIQUOTA_FB_DUMP=$T/fb.dump#; s#/dev/fb0#$T/fb0#; s#> /sys/power/wake_unlock#>> $T/wake_unlock#" "$T/bin/restore.sh"
 echo LIVE-SCREEN > "$T/fb0"
 
 for c in killall lipc-set-prop usleep; do
@@ -29,6 +32,7 @@ export PATH="$T/bin:$PATH"
 pass=0; fail=0
 ok()  { if [ "$1" = "$2" ]; then echo "PASS $3"; pass=$((pass+1)); else echo "FAIL $3 (want [$1] got [$2])"; fail=$((fail+1)); fi; }
 cnt() { grep -c "$1" "$T/log" 2>/dev/null; }
+wlines() { if [ -f "$T/$1" ]; then wc -l < "$T/$1"; else echo 0; fi; }
 
 # $1 = what the fake app binary should do. The app overwrites the framebuffer,
 # so "the saved screen came back" is a real assertion and not just "nothing
@@ -52,6 +56,9 @@ ok 1 "$(cnt 'watchdog started')" "A: watchdog launched"
 ok 1 "$(cnt 'killall -STOP awesome cvm')" "A: framework frozen"
 ok 1 "$(restores)" "A: framework restored exactly once"
 ok 1 "$(repainted)" "A: saved screen repainted"
+ok 1 "$(wlines wake_lock)" "A: wake_lock grabbed exactly once"
+ok aiquota "$(cat "$T/wake_lock" 2>/dev/null)" "A: wake_lock held by aiquota"
+ok 1 "$(wlines wake_unlock)" "A: wake_unlock released exactly once"
 
 # --- Test B: app crashes (the SIGSEGV path, seen from the wrapper)
 setup_app 'kill -SEGV $$'

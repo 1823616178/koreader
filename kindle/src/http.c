@@ -204,6 +204,7 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
 {
     char host[256];
     char port[8];
+    char host_hdr[sizeof(host) + sizeof(port)]; /* "host[:port]" authority */
     const char *path;
     struct addrinfo hints;
     struct addrinfo *res = NULL;
@@ -256,7 +257,12 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
     /* HTTP/1.0 on purpose: chunked transfer-coding is an HTTP/1.1 feature, so a
      * 1.0 request forbids chunked responses. This client does not de-chunk (the
      * Lua stack's LuaSocket did), and "Connection: close" + read-to-EOF loses
-     * nothing else. */
+     * nothing else. Host names the port unless it is the default 80: virtual
+     * hosts route on the exact authority string. */
+    if (strcmp(port, "80") == 0)
+        snprintf(host_hdr, sizeof(host_hdr), "%s", host);
+    else
+        snprintf(host_hdr, sizeof(host_hdr), "%s:%s", host, port);
     request_len = snprintf(request, sizeof(request),
                            "GET %s HTTP/1.0\r\n"
                            "Host: %s\r\n"
@@ -264,7 +270,7 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
                            "Cache-Control: no-cache\r\n"
                            "Connection: close\r\n"
                            "\r\n",
-                           path, host);
+                           path, host_hdr);
     wd_expect(IO_TIMEOUT_S + WD_SLACK_S);
     if (request_len < 0 || (size_t)request_len >= sizeof(request) ||
         send_all(fd, request, (size_t)request_len, errbuf, errbuf_size) != 0) {

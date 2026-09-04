@@ -119,10 +119,14 @@ Settings *settings_create(Ui *ui, const AppConfig *cfg)
             if (s->light_on) {
                 s->light_last_on = s->light_level;
             } else {
-                /* Off: prefer the level the dashboard's idle dim remembers
-                 * (shared light.c slot) so re-opening restores the same
-                 * brightness instead of a blind max/2. */
-                s->light_last_on = light_idle_level();
+                /* Off: seed the toggle-back-on target from light.c's user
+                 * slot -- the last positive level this process applied. It
+                 * survives across settings-page sessions (the idle-dim slot
+                 * never does: the main loop restores and clears it before
+                 * this page opens). Process-local only, never persisted,
+                 * never a config key; clamp into range, then max/2 as the
+                 * fallback when no positive level is known. */
+                s->light_last_on = light_clamp(light_last_on(), s->light_max);
                 if (s->light_last_on < 1)
                     s->light_last_on = s->light_max / 2;
                 if (s->light_last_on < 1)
@@ -339,9 +343,10 @@ static void restore_row(const Settings *s, int fbfd, int i)
 
 /* Adjust the light level by one click from the 前光 row's stepper: applied
  * to powerd immediately (no keypad layer). State and value strings only --
- * the caller repaints, so a no-op click (!light_ok, already at 0, powerd
- * refusing) still un-inverts the flashed key. An applied change cancels a
- * pending idle-dim restore: the user, not the idle timer, owns the level. */
+ * the caller repaints, so a no-op click (!light_ok, already at 0, at the
+ * ceiling, powerd refusing) still un-inverts the flashed key. A click whose
+ * clamped target changes neither level nor on/off skips the lipc child
+ * process entirely -- powerd's side would not change either. */
 static void step_light(Settings *s, int up)
 {
     int next = -1; /* -1: nothing to apply */
@@ -362,13 +367,14 @@ static void step_light(Settings *s, int up)
         }
         if (next >= 0) {
             next = light_clamp(next, s->light_max);
-            if (light_set_intensity(next) == 0) {
+            /* Same level and same on/off (+ at the ceiling clamps back to
+             * light_max): nothing to tell powerd, skip the lipc spawn. */
+            if ((next != s->light_level || (next > 0) != s->light_on) &&
+                light_set_intensity(next) == 0) {
                 s->light_level = next;
                 s->light_on = next > 0;
                 if (next > 0)
                     s->light_last_on = next;
-                if (light_idle_level() > 0)
-                    light_idle_cancel();
             }
         }
     }
@@ -435,8 +441,6 @@ SettingsHit settings_handle_tap(Settings *s, int fbfd, int x, int y)
         if (light_set_intensity(next) == 0) {
             s->light_level = next;
             s->light_on = next > 0;
-            if (light_idle_level() > 0)
-                light_idle_cancel(); /* user override beats the idle dim */
             refresh_values(s);
         }
         restore_row(s, fbfd, ROW_LIGHT);

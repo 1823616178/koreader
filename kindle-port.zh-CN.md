@@ -41,7 +41,7 @@
 | `quotapage.lua:39-71` 的尺寸算式 | 同样的算式，改用整型像素运算 |
 | `quotapage.lua:221-234` 的 `ButtonTable` | 自绘按钮 + 矩形命中区表 |
 | `quotadata.lua:87` 的 `socketutil:set_timeout(45, 50)` | `SO_RCVTIMEO` / `SO_SNDTIMEO`，**必须保留** |
-| `socket.http` | 手写 HTTP/1.1 GET over TCP |
+| `socket.http` | 手写 HTTP/1.0 GET over TCP |
 | `rapidjson.decode` | vendored cJSON |
 | `quotadata.lua:49-62` 的 `normalizeUrl` | 同逻辑的 C 实现 |
 | `LuaSettings`（`settings/readingquota.lua`） | `key=value` 纯文本配置文件 |
@@ -98,7 +98,7 @@ kindle/
     ui.c   ui.h   卡片布局、分段进度条、按钮命中区  ← quotapage.lua + quotabar.lua
     keypad.c .h   数字网格键盘（0-9 . : 退格 确定 取消）
     quota.c  .h   JSON 解析、空值处理、百分比与重置时间格式化  ← quotadata.lua
-    http.c   .h   纯 HTTP/1.1 GET over TCP
+    http.c   .h   纯 HTTP/1.0 GET over TCP
     input.c  .h   evdev 触摸：节点探测 + 坐标变换 + SYN_REPORT 组包
     config.c .h   key=value 配置读写                ← LuaSettings
     net.c    .h   WiFi 唤醒与连通性等待（lipc）
@@ -118,7 +118,7 @@ tools/
 
 ### 几个设计约定
 
-**HTTP 不引 libcurl。** Usage API 是纯 HTTP、无 TLS、无认证，一次 `getaddrinfo` + `connect` + `GET` 就够，约 120 行，避免把 libcurl + openssl 拖进静态链接。
+**HTTP 不引 libcurl。** Usage API 是纯 HTTP、无 TLS、无认证，一次 `getaddrinfo` + `connect` + `GET` 就够，约 120 行，避免把 libcurl + openssl 拖进静态链接。请求发 HTTP/1.0 而非 1.1：1.1 的 chunked 编码本客户端不做解码，1.0 功能等价。
 
 **配置文件放 `/mnt/us/extensions/aiquota/config`。** FAT32 分区，插 USB 就能在电脑上直接改，等于给数字键盘留了一条逃生通道。
 
@@ -195,6 +195,7 @@ restore_framework() {
     killall -CONT awesome cvm
     lipc-set-prop com.lab126.pillow disableEnablePillow enable
     lipc-set-prop -i com.lab126.powerd preventScreenSaver 0
+    echo aiquota > /sys/power/wake_unlock # 释放启动侧抓的内核 wake lock
     cat /var/tmp/aiquota-fb.dump > /dev/fb0
 }
 
@@ -204,6 +205,7 @@ trap restore_framework EXIT INT HUP     # 无论怎么退出都恢复
 cat /dev/fb0 > /var/tmp/aiquota-fb.dump # 备份当前画面
 lipc-set-prop com.lab126.pillow disableEnablePillow disable
 lipc-set-prop -i com.lab126.powerd preventScreenSaver 1
+echo aiquota > /sys/power/wake_lock     # 抓内核 wake lock，挡住无视 preventScreenSaver 的空闲挂起
 killall -STOP awesome cvm
 usleep 250000
 
@@ -244,7 +246,7 @@ exec sh /mnt/us/extensions/aiquota/bin/aiquota.sh
 
 | 风险 | 严重度 | 缓解 |
 | --- | --- | --- |
-| **冻结 framework 后程序崩溃 → 系统卡死，只能强制重启** | 高 | 六层防御，详见 `kindle/README.md` §9：① 脚本 `trap restore_framework EXIT INT HUP` 无条件恢复（恢复逻辑在 `bin/restore.sh`，冻结前先 source 进内存）＋二进制里的 SIGSEGV / SIGABRT handler；② OOM 优先级反转（脚本 `-1000`、应用 `+1000`），让内存压力只杀应用；③ 独立会话的看门狗兜底恢复；④ 心跳见证主线程（每个阻塞调用先 `wd_expect()` 报备上限），假死 120 秒后强杀；⑤ 杀不掉（D 状态）就由看门狗直接解冻；⑥ 空闲 `idle_timeout_s` 秒自动退出（设 0 可关闭计时，等待改为 5 分钟分段轮询以维持心跳报备上限）。手动兜底：`sh .../bin/restore.sh`。开发期全程挂 USBNetwork/SSH |
+| **冻结 framework 后程序崩溃 → 系统卡死，只能强制重启** | 高 | 五层防御，详见 `kindle/README.md` §9：① 脚本 `trap restore_framework EXIT INT HUP` 无条件恢复（恢复逻辑在 `bin/restore.sh`，冻结前先 source 进内存）＋二进制里的 SIGSEGV / SIGABRT handler；② OOM 优先级反转（脚本 `-1000`、应用 `+1000`），让内存压力只杀应用；③ 独立会话的看门狗兜底恢复；④ 心跳见证主线程（每个阻塞调用先 `wd_expect()` 报备上限），假死 120 秒后强杀；⑤ 杀不掉（D 状态）就由看门狗直接解冻。原第 ⑥ 层「空闲 `idle_timeout_s` 秒自动退出」已按常驻仪表盘需求移除，兜底职责随之消失——触摸点不中的场景应用是活的、心跳正常，看门狗不会介入。手动兜底：`sh .../bin/restore.sh`。开发期全程挂 USBNetwork/SSH |
 | 从 KUAL 启动被级联杀死 | 中 | `trap "" TERM` + `killall -STOP`，不用 `stop lab126_gui`（见 §6） |
 | 触摸坐标变换因机型而异（可能要 swap / mirror） | 中 | 内置 `--calibrate` 模式，标定结果写进配置文件 |
 | 5.16.2.1.1 上 lipc 属性名与参考实现有出入 | 中 | 阶段 0 先在设备上逐条手工验证，再写死进脚本 |

@@ -145,8 +145,12 @@ static void install_signal_handlers(void)
  * bounded segments with the watchdog re-armed before each one. Segment length
  * trades wedge-detection latency against a tiny gesture risk: a touch whose
  * down and up straddle a segment boundary is dropped (state self-recovers on
- * the next touch). 5 min puts worst-case wedged-app detection at ~7 min here
- * while the straddle odds are ~1 in 50 000 taps. */
+ * the next touch). The same drop happens when a wait ends on a deadline
+ * instead of a segment: the idle light-off / auto-refresh tick makes
+ * wait_tap_until return 1 with a gesture in progress, voiding it (the next
+ * touch self-recovers again). Both are known boundaries, kept explicit here
+ * so nobody files them as bugs. 5 min puts worst-case wedged-app detection
+ * at ~7 min here while the straddle odds are ~1 in 50 000 taps. */
 #define TAP_WAIT_CHUNK_S 300
 
 /* Idle frontlight timeout (docs/kindle-ui-and-power.md P0): the parked
@@ -253,10 +257,61 @@ static void full_refresh(int fbfd)
  * whose fetch brings back the same data with an unchanged battery badge
  * does not need the panel to flash at all -- these track the visible frame
  * well enough to decide that (FNV-1a64 over status + body-or-error text,
- * plus the title-bar battery figures as painted). */
+ * plus the title-bar battery cells and charging flag as painted). */
 static int frame_is_dashboard;        /* a dashboard (not skeleton/page) is up */
 static unsigned long long frame_sig;  /* signature of the painted content */
-static int frame_batt, frame_chg;     /* battery figures as painted */
+static int frame_batt, frame_chg;     /* cells (-1..5) and charging flag as painted */
+
+static int batt_chg_flag(int chg)
+{
+    return chg == 1 ? 1 : 0;
+}
+
+static void remember_batt(int pct, int chg)
+{
+    frame_batt = ui_batt_cells(pct);
+    frame_chg = batt_chg_flag(chg);
+}
+
+/* Idle-deadline hitchhiker (docs/kindle-light-and-battery.md G1): the
+ * frontlight timeout already wakes the loop, so sample the battery then
+ * and DU only the badge strip if the cell count or plug state moved.
+ * No new timer, no full-screen flash. */
+static void maybe_refresh_badges(int fbfd, Ui *ui)
+{
+    char ssid[33];
+    int batt, chg;
+    FBInkRect r;
+
+    if (!frame_is_dashboard)
+        return;
+    net_battery(&batt, &chg);
+    if (ui_batt_cells(batt) == frame_batt && batt_chg_flag(chg) == frame_chg)
+        return;
+    net_wifi_ssid(ssid, sizeof(ssid));
+    memset(&r, 0, sizeof(r));
+    ui_redraw_badges(ui, net_wifi_state(), ssid, batt, chg, &r);
+    if (r.width > 0 && r.height > 0)
+        ui_refresh(fbfd, &r, WFM_DU);
+    remember_batt(batt, chg);
+}
+
+static void paint_current_dashboard(int fbfd, Ui *ui, const QuotaSnapshot *snap,
+                                    const char *host, int st, const char *detail,
+                                    int auto_refresh_min, int wfm_mode)
+{
+    char ssid[33];
+    int batt, chg;
+
+    net_battery(&batt, &chg);
+    net_wifi_ssid(ssid, sizeof(ssid));
+    ui_draw_dashboard(ui, snap, host, st == ST_ERROR ? "失败" : "已连接",
+                      detail, 0, net_wifi_state(), ssid, batt, chg,
+                      auto_refresh_min);
+    frame_is_dashboard = 1;
+    remember_batt(batt, chg);
+    full_refresh_mode(fbfd, wfm_mode);
+}
 
 #define FNV_BASIS 0xcbf29ce484222325ULL
 
@@ -380,10 +435,11 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
         net_battery(&batt, &chg);
         net_wifi_ssid(ssid, sizeof(ssid));
         if (frame_is_dashboard && sig == frame_sig &&
-            batt == frame_batt && chg == frame_chg) {
-            /* Identical cycle: keep the frame, skip the flash. The battery
-             * badge can lag one cycle at worst; the first cycle where
-             * anything moves repaints it. */
+            ui_batt_cells(batt) == frame_batt &&
+            batt_chg_flag(chg) == frame_chg) {
+            /* Identical cycle: keep the frame, skip the flash. Cell-count
+             * compare (not raw percent) so a 1% drip does not force a
+             * visually identical redraw. */
             return st;
         }
         ui_draw_dashboard(ui, snap, host, st == ST_ERROR ? "失败" : "已连接",
@@ -391,8 +447,7 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
                           auto_refresh_min);
         frame_is_dashboard = 1;
         frame_sig = sig;
-        frame_batt = batt;
-        frame_chg = chg;
+        remember_batt(batt, chg);
     }
     full_refresh_mode(fbfd, auto_cycle ? WFM_GL16 : WFM_GC16);
     return st;
@@ -603,6 +658,69 @@ static int run_calibrate(int fbfd, int scr_w, int scr_h, int input_fd)
     return 0;
 }
 
+/* Local modal: enlarge one dashboard card (docs/kindle-card-popup.md).
+ * Auto-refresh is paused for the duration -- an overdue deadline returns
+ * 1 immediately from wait_tap_until once we leave, so the missed cycle
+ * is made up without painting under the popup. Idle frontlight still
+ * ticks: the LED does not care what is on screen. Returns -1 if the
+ * touch device disappears. */
+static int run_card_popup(int fbfd, int input_fd, int scr_w, int scr_h,
+                          const AppConfig *cfg, Ui *ui,
+                          const QuotaSnapshot *snap, const char *host,
+                          int st, const char *detail, UiCard card,
+                          long *idle_deadline)
+{
+    FBInkDump dump;
+    FBInkRect prect;
+    int have_dump = 0;
+    int wr, x = 0, y = 0;
+
+    memset(&dump, 0, sizeof(dump));
+    ui_popup_rect(ui, &prect);
+    if (fbink_rect_dump(fbfd, &prect, &dump) == 0)
+        have_dump = 1;
+    ui_popup_draw(ui, snap, st == ST_ERROR ? "失败" : "已连接", detail,
+                  card, &prect);
+    ui_refresh(fbfd, &prect, WFM_GC16);
+
+    for (;;) {
+        wr = wait_tap_until(input_fd, scr_w, scr_h, cfg, *idle_deadline,
+                            &x, &y);
+        if (wr > 0) {
+            long now = (long)time(NULL);
+
+            if (*idle_deadline > 0 && now >= *idle_deadline) {
+                light_idle_off();
+                *idle_deadline = 0;
+                maybe_refresh_badges(fbfd, ui);
+            }
+            continue; /* auto-refresh is deferred until the popup closes */
+        }
+        if (wr < 0)
+            return -1;
+        light_idle_restore();
+        *idle_deadline = (long)time(NULL) + LIGHT_IDLE_OFF_S;
+        break;
+    }
+
+    if (have_dump) {
+        FBInkConfig rcfg;
+        int rr;
+
+        memset(&rcfg, 0, sizeof(rcfg));
+        rcfg.wfm_mode = WFM_GC16;
+        rr = fbink_restore(fbfd, &rcfg, &dump);
+        fbink_free_dump_data(&dump);
+        if (rr == 0)
+            return 0;
+    }
+    /* Dump failed (OOM / no IMAGE) or restore rejected the buffer
+     * (bitdepth/rotation): fall back to a full GL16 redraw. */
+    paint_current_dashboard(fbfd, ui, snap, host, st, detail,
+                            cfg->auto_refresh_min, WFM_GL16);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     AppConfig cfg;
@@ -730,8 +848,7 @@ int main(int argc, char **argv)
                               cfg.auto_refresh_min);
             frame_is_dashboard = 1;
             frame_sig = frame_sig_of("已连接", DEMO_JSON);
-            frame_batt = batt;
-            frame_chg = chg;
+            remember_batt(batt, chg);
         }
         full_refresh(fbfd);
         if (input_fd < 0) {
@@ -787,6 +904,7 @@ int main(int argc, char **argv)
             if (idle_deadline > 0 && now >= idle_deadline) {
                 light_idle_off(); /* remembers the level for the next touch */
                 idle_deadline = 0;
+                maybe_refresh_badges(fbfd, ui);
             }
             if (auto_deadline > 0 && now >= auto_deadline) {
                 auto_cycle = 1;
@@ -805,8 +923,20 @@ int main(int argc, char **argv)
         light_idle_restore();
         idle_deadline = (long)time(NULL) + LIGHT_IDLE_OFF_S;
         action = ui_hit_button(ui, x, y);
-        if (action == UI_ACTION_NONE)
+        if (action == UI_ACTION_NONE) {
+            UiCard card = ui_hit_card(ui, x, y);
+
+            if (card == UI_CARD_NONE)
+                continue;
+            if (run_card_popup(fbfd, input_fd, scr_w, scr_h, &cfg, ui,
+                               &snap, host, st, detail, card,
+                               &idle_deadline) < 0) {
+                fprintf(stderr, "aiquota: touch input device lost\n");
+                rc = 1;
+                goto out;
+            }
             continue;
+        }
         ui_flash_button(ui, fbfd, action);
 
         if (action == UI_ACTION_CLOSE)
@@ -864,10 +994,12 @@ int main(int argc, char **argv)
 
                     if (hit == SET_HIT_EDIT_URL) {
                         snprintf(edit, sizeof(edit), "%s", settings_url(sp));
+                        keypad_set_digits_only(kp, 0); /* host:port charset */
                         keypad_draw(kp, "接口地址", edit);
                     } else if (hit == SET_HIT_EDIT_REFRESH) {
                         snprintf(edit, sizeof(edit), "%d",
                                  settings_refresh_min(sp));
+                        keypad_set_digits_only(kp, 1); /* pure-number field */
                         keypad_draw(kp, "自动刷新(分钟)", edit);
                     }
                     full_refresh(fbfd);
@@ -893,7 +1025,21 @@ int main(int argc, char **argv)
                             config_normalize_url(norm, sizeof(norm), edit);
                             url_changed |= settings_set_url(sp, norm);
                         } else if (hit == SET_HIT_EDIT_REFRESH) {
-                            settings_set_refresh_min(sp, atoi(edit));
+                            /* edit holds up to 511 keystrokes, far past int
+                             * range: atoi overflow is UB and glibc wraps
+                             * negative, which the downstream clamp reads as
+                             * "off" -- the wrong direction for a big number.
+                             * strtol saturates in the long domain instead
+                             * (and stops at '.'/':', so "1.5" parses as 1);
+                             * clamp there to the documented [0, 60], then
+                             * hand over an int that cannot overflow. */
+                            long minutes = strtol(edit, NULL, 10);
+
+                            if (minutes < 0)
+                                minutes = 0;
+                            if (minutes > CONFIG_AUTO_REFRESH_MAX)
+                                minutes = CONFIG_AUTO_REFRESH_MAX;
+                            settings_set_refresh_min(sp, (int)minutes);
                         }
                     }
                     /* Confirm and cancel both land back on the page, redrawn
@@ -913,25 +1059,11 @@ int main(int argc, char **argv)
                 /* New endpoint: keep the confirm-address-refetches semantic. */
                 st = ST_LOADING;
             } else {
-                char ssid[33];
-                int batt, chg;
-
-                net_battery(&batt, &chg);
-                net_wifi_ssid(ssid, sizeof(ssid));
-                ui_draw_dashboard(ui, &snap, host,
-                                  st == ST_ERROR ? "失败" : "已连接",
-                                  detail, 0, net_wifi_state(), ssid, batt, chg,
-                                  cfg.auto_refresh_min);
-                /* Same data and status as the frame before the settings
-                 * page: keep its signature, adopt the fresher battery
-                 * figures so the skip test stays honest. */
-                frame_is_dashboard = 1;
-                frame_batt = batt;
-                frame_chg = chg;
-                /* The frame was repainted from the same snapshot (only the
-                 * config keys / the frontlight / the auto-refresh line can
-                 * differ): GL16 wakes the panel without the GC16 flash. */
-                full_refresh_mode(fbfd, WFM_GL16);
+                /* Same snapshot as before settings: keep its signature,
+                 * adopt the fresher battery cells so the skip test stays
+                 * honest. GL16 wakes the panel without the GC16 flash. */
+                paint_current_dashboard(fbfd, ui, &snap, host, st, detail,
+                                        cfg.auto_refresh_min, WFM_GL16);
             }
             /* Time spent editing does not count as dashboard idle. */
             idle_deadline = (long)time(NULL) + LIGHT_IDLE_OFF_S;

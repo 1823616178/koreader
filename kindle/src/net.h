@@ -25,18 +25,26 @@ int  net_wifi_state(void);
 /* Current SSID for the title bar, "" when unknown. Probes `iw dev wlan0
  * link` once, and only while the radio is known to be up (g_wifi_state==1,
  * i.e. mid-fetch when the chip is already awake): disconnected -- the idle
- * norm with wifi_auto_off -- costs no process spawn at all. Missing binary,
- * hidden SSID or any other failure degrades to "" and the caller falls back
- * to its plain "WiFi" label. */
+ * norm with wifi_auto_off -- costs no process spawn at all. The SSID line is
+ * matched after skipping its leading whitespace (iw indents it with a tab),
+ * and a name iw quoted with literal "\xNN" escapes -- its print_ssid_escaped
+ * rendering of non-ASCII/non-printable bytes -- counts as non-ASCII and also
+ * comes back "". Missing binary, hidden SSID or any other failure degrades
+ * to "" and the caller falls back to its plain "WiFi" label. */
 void net_wifi_ssid(char *buf, size_t n);
 
-/* Battery through sysfs file reads (yoshi_battery, PW2 and later): one
- * open/read/close per value, no lipc subprocess, and callers invoke it only
- * at render points -- never polled -- which is the power-correct shape on an
- * e-ink device that repaints only when data changes. *pct: 0-100, -1 when
- * unreadable (caller draws no battery text). *charging: 1 charging, 0 not,
- * -1 unknown. Returns 0 when *pct is usable, -1 otherwise. */
+/* Battery at render points only -- never polled. Tries SoC-specific sysfs
+ * (yoshi / wario / power_supply) then `com.lab126.powerd battLevel` /
+ * `isCharging`, same daemon the frontlight already talks to. The first
+ * source that returns a usable value is cached; a cached source that stops
+ * answering is dropped and the table is rescanned once before lipc. *pct:
+ * 0-100, -1 when unreadable (caller draws no battery icon). *charging: 1 on
+ * the plug, 0 not, -1 unknown. Returns 0 when *pct is usable, -1 otherwise. */
 int  net_battery(int *pct, int *charging);
+
+/* Parse one sysfs charging line. 1 / Charging / Full -> 1; 0 / Discharging
+ * -> 0; anything else -> -1. Exported for the host unit tests. */
+int  net_parse_charging(const char *s);
 
 /* Keep printable ASCII (0x20-0x7E) and trim surrounding whitespace, in
  * place: the bundled subset font has no glyphs beyond ASCII plus the UI

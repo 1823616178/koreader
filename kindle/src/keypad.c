@@ -2,7 +2,9 @@
  * (kindle-port.zh-CN.md section 4): Kindle's system keyboard belongs to the
  * frozen framework, so the app draws its own. The charset is 0-9 . : plus the
  * CJK labels 退格 / 确定 / 取消, all inside the bundled font subset. Targets
- * look like 123.161.179.32:46927; domains and paths go through the config. */
+ * look like 123.161.179.32:46927; domains and paths go through the config.
+ * The 自动刷新 field reuses the same instance in digits-only mode
+ * (keypad_set_digits_only): '.' and ':' are grayed and inert there. */
 #define _POSIX_C_SOURCE 200112L
 #define _DEFAULT_SOURCE /* usleep under -std=c99 */
 
@@ -29,7 +31,16 @@ struct Keypad {
     int n_keys;
     FBInkRect echo_rect;
     int title_y;
+    int digits_only;    /* per-field mode: '.' and ':' grayed + inert */
 };
+
+/* '.' and ':' exist for host:port targets only; a pure-number field
+ * (自动刷新) grays them out and swallows their taps. */
+static int key_disabled(const Keypad *kp, const Key *k)
+{
+    return kp->digits_only && k->kind == KEY_CHAR &&
+           (k->ch == '.' || k->ch == ':');
+}
 
 /* Row 4's 确定 spans the last two columns (span = 2). */
 static const struct {
@@ -117,12 +128,20 @@ void keypad_destroy(Keypad *kp)
     free(kp); /* the font set belongs to Ui, not freed here */
 }
 
+void keypad_set_digits_only(Keypad *kp, int on)
+{
+    if (kp)
+        kp->digits_only = on ? 1 : 0;
+}
+
 /* Normal: black frame + white face. Inverted (pressed): solid black face with
- * white glyphs (ui_text is_inverted flips the drawn pixels; no OT bg paint). */
+ * white glyphs (ui_text is_inverted flips the drawn pixels; no OT bg paint).
+ * Disabled (digits-only '.'/':'): gray label, the ui.c disabled-button idiom. */
 static void draw_key(const Keypad *kp, const Key *k, int inverted)
 {
     const Ui *ui = kp->ui;
     int tw = 0, th = 0, x, y;
+    int fg = key_disabled(kp, k) ? FG_GRAY8 : FG_BLACK;
 
     ui_fill(ui, k->rect.left, k->rect.top, k->rect.width, k->rect.height, UI_INK_BLACK);
     if (!inverted)
@@ -135,7 +154,7 @@ static void draw_key(const Keypad *kp, const Key *k, int inverted)
     x = k->rect.left + (k->rect.width - tw) / 2;
     y = k->rect.top + (k->rect.height - th) / 2;
     ui_text(ui, k->label, ui->px_card_title, x, y, tw, th,
-            UI_ALIGN_LEFT, FG_BLACK, inverted);
+            UI_ALIGN_LEFT, fg, inverted);
 }
 
 /* Erase and redraw the echo line (no refresh; callers refresh as needed).
@@ -191,6 +210,8 @@ int keypad_handle_tap(Keypad *kp, int fbfd, int x, int y, char *text, size_t tex
     }
     if (!k)
         return 0;
+    if (key_disabled(kp, k))
+        return 0; /* grayed key: no press feedback, no edit, keep editing */
 
     /* Press feedback: invert, fast partial refresh, hold, restore, refresh. */
     draw_key(kp, k, 1);

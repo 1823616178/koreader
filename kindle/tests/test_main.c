@@ -27,6 +27,7 @@
 #include "light.h"
 #include "net.h"
 #include "quota.h"
+#include "ui.h"
 #include "watchdog.h"
 
 static int failures = 0;
@@ -664,6 +665,132 @@ static void test_light_clamp_and_no_lipc(void)
     CHECK(light_idle_level() == 0);
 }
 
+static void test_ui_batt_cells(void)
+{
+    CHECK(ui_batt_cells(-1) == -1);
+    CHECK(ui_batt_cells(101) == -1);
+    CHECK(ui_batt_cells(-100) == -1);
+    CHECK(ui_batt_cells(0) == 0);
+    CHECK(ui_batt_cells(5) == 0);
+    CHECK(ui_batt_cells(10) == 0);
+    CHECK(ui_batt_cells(11) == 1);
+    CHECK(ui_batt_cells(29) == 1);
+    CHECK(ui_batt_cells(30) == 2);
+    CHECK(ui_batt_cells(49) == 2);
+    CHECK(ui_batt_cells(50) == 3);
+    CHECK(ui_batt_cells(69) == 3);
+    CHECK(ui_batt_cells(70) == 4);
+    CHECK(ui_batt_cells(89) == 4);
+    CHECK(ui_batt_cells(90) == 5);
+    CHECK(ui_batt_cells(100) == 5);
+}
+
+static void test_ui_cards_from_providers(void)
+{
+    ProviderSelection p;
+    UiCard ids[UI_CARD_SLOTS];
+    int n;
+
+    memset(&p, 0, sizeof(p));
+    n = ui_cards_from_providers(&p, ids, UI_CARD_SLOTS);
+    CHECK(n == 1);
+    CHECK(ids[0] == UI_CARD_INFO);
+
+    p.grok = 1;
+    p.kimi = 1;
+    n = ui_cards_from_providers(&p, ids, UI_CARD_SLOTS);
+    CHECK(n == 3);
+    CHECK(ids[0] == UI_CARD_GROK);
+    CHECK(ids[1] == UI_CARD_KIMI);
+    CHECK(ids[2] == UI_CARD_INFO);
+
+    memset(&p, 0, sizeof(p));
+    p.agy = 1;
+    n = ui_cards_from_providers(&p, ids, UI_CARD_SLOTS);
+    CHECK(n == 3);
+    CHECK(ids[0] == UI_CARD_AGY_GEMINI);
+    CHECK(ids[1] == UI_CARD_AGY_THIRD);
+    CHECK(ids[2] == UI_CARD_INFO);
+
+    p.grok = 1;
+    p.claude = 1;
+    p.codex = 1;
+    p.kimi = 1;
+    p.opencode = 1;
+    p.agy = 1;
+    n = ui_cards_from_providers(&p, ids, UI_CARD_SLOTS);
+    CHECK(n == 8);
+    CHECK(ids[0] == UI_CARD_GROK);
+    CHECK(ids[1] == UI_CARD_CLAUDE);
+    CHECK(ids[2] == UI_CARD_CODEX);
+    CHECK(ids[3] == UI_CARD_KIMI);
+    CHECK(ids[4] == UI_CARD_OPENCODE);
+    CHECK(ids[5] == UI_CARD_AGY_GEMINI);
+    CHECK(ids[6] == UI_CARD_AGY_THIRD);
+    CHECK(ids[7] == UI_CARD_INFO);
+
+    /* Slot number is not identity: dropping Claude/Codex must compact. */
+    p.claude = 0;
+    p.codex = 0;
+    n = ui_cards_from_providers(&p, ids, UI_CARD_SLOTS);
+    CHECK(n == 6);
+    CHECK(ids[0] == UI_CARD_GROK);
+    CHECK(ids[1] == UI_CARD_KIMI);
+    CHECK(ids[2] == UI_CARD_OPENCODE);
+    CHECK(ids[3] == UI_CARD_AGY_GEMINI);
+    CHECK(ids[4] == UI_CARD_AGY_THIRD);
+    CHECK(ids[5] == UI_CARD_INFO);
+
+    CHECK(ui_cards_from_providers(&p, ids, 1) == 1);
+    CHECK(ids[0] == UI_CARD_GROK);
+    CHECK(ui_cards_from_providers(NULL, ids, UI_CARD_SLOTS) == 0);
+    CHECK(ui_cards_from_providers(&p, NULL, UI_CARD_SLOTS) == 0);
+}
+
+static void test_ui_rect_contains(void)
+{
+    FBInkRect r;
+
+    r.left = 10;
+    r.top = 20;
+    r.width = 100;
+    r.height = 50;
+    CHECK(ui_rect_contains(&r, 10, 20));
+    CHECK(ui_rect_contains(&r, 109, 69));
+    CHECK(!ui_rect_contains(&r, 110, 20));
+    CHECK(!ui_rect_contains(&r, 10, 70));
+    CHECK(!ui_rect_contains(&r, 9, 20));
+    CHECK(!ui_rect_contains(&r, 10, 19));
+    CHECK(!ui_rect_contains(NULL, 10, 20));
+}
+
+static void test_ui_hit_card(void)
+{
+    Ui ui;
+
+    memset(&ui, 0, sizeof(ui));
+    ui.card_rect[0].left = 10;
+    ui.card_rect[0].top = 10;
+    ui.card_rect[0].width = 100;
+    ui.card_rect[0].height = 50;
+    ui.card_rect[1].left = 120;
+    ui.card_rect[1].top = 10;
+    ui.card_rect[1].width = 100;
+    ui.card_rect[1].height = 50;
+    ui.card_id[0] = UI_CARD_GROK;
+    ui.card_id[1] = UI_CARD_INFO;
+    ui.card_drawn = 2;
+
+    CHECK(ui_hit_card(&ui, 60, 35) == UI_CARD_GROK);  /* card 1 center */
+    CHECK(ui_hit_card(&ui, 170, 35) == UI_CARD_INFO); /* card 2 center */
+    CHECK(ui_hit_card(&ui, 300, 35) == UI_CARD_NONE); /* blank space */
+    CHECK(ui_hit_card(&ui, 115, 35) == UI_CARD_NONE); /* gap between cards */
+
+    /* A hit inside a rect still misses when nothing was painted. */
+    ui.card_drawn = 0;
+    CHECK(ui_hit_card(&ui, 60, 35) == UI_CARD_NONE);
+}
+
 static void test_net_ensure_wifi_no_lipc(void)
 {
     /* The host has no lipc binaries: net_ensure_wifi must return -1
@@ -716,6 +843,32 @@ static void test_net_sanitize_ssid(void)
     strcpy(s, "");
     net_sanitize_ssid(s);
     CHECK(s[0] == '\0');
+}
+
+static void test_net_parse_charging(void)
+{
+    CHECK(net_parse_charging("1") == 1);
+    CHECK(net_parse_charging("0") == 0);
+    CHECK(net_parse_charging("1\n") == 1);
+    CHECK(net_parse_charging("0\r\n") == 0);
+    CHECK(net_parse_charging("Charging") == 1);
+    CHECK(net_parse_charging("charging\n") == 1);
+    CHECK(net_parse_charging("Full") == 1);
+    CHECK(net_parse_charging("full") == 1);
+    CHECK(net_parse_charging("Discharging") == 0);
+    CHECK(net_parse_charging("  1") == 1);
+    CHECK(net_parse_charging("") == -1);
+    CHECK(net_parse_charging(NULL) == -1);
+    CHECK(net_parse_charging("unknown") == -1);
+
+    /* Must not crash; on a Kindle this is 0-100, on the host usually -1. */
+    {
+        int pct = 99, chg = 99;
+
+        net_battery(&pct, &chg);
+        CHECK(pct >= -1 && pct <= 100);
+        CHECK(chg >= -1 && chg <= 1);
+    }
 }
 
 /* --- input_wait_tap harness -------------------------------------------------
@@ -952,8 +1105,13 @@ int main(void)
     RUN(test_input_wait_tap_timeout);
     RUN(test_wd_should_beat);
     RUN(test_net_sanitize_ssid);
+    RUN(test_net_parse_charging);
     RUN(test_net_ensure_wifi_no_lipc);
     RUN(test_light_clamp_and_no_lipc);
+    RUN(test_ui_batt_cells);
+    RUN(test_ui_cards_from_providers);
+    RUN(test_ui_rect_contains);
+    RUN(test_ui_hit_card);
 
     if (failures == 0) {
         printf("ALL PASS\n");

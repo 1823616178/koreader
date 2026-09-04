@@ -21,12 +21,14 @@ AIQUOTA_FB_DUMP=/var/tmp/aiquota-fb.dump
 restore_framework() {
     aq_frozen=0
     # pidof can answer with several pids; /proc/<pid>/stat field 3 is the
-    # state letter, and T means the process is SIGSTOPped.
-    aq_cvm=$(pidof cvm 2>/dev/null | awk '{print $1}')
-    if [ -n "$aq_cvm" ] &&
-       [ "$(awk '{print $3}' /proc/"$aq_cvm"/stat 2>/dev/null)" = "T" ]; then
-        aq_frozen=1
-    fi
+    # state letter, and T means the process is SIGSTOPped. Check them all: one
+    # stopped instance among running ones still means a frozen framework.
+    for aq_cvm in $(pidof cvm 2>/dev/null); do
+        if [ "$(awk '{print $3}' /proc/"$aq_cvm"/stat 2>/dev/null)" = "T" ]; then
+            aq_frozen=1
+            break
+        fi
+    done
 
     killall -CONT awesome cvm 2>/dev/null
     lipc-set-prop com.lab126.pillow disableEnablePillow enable 2>/dev/null

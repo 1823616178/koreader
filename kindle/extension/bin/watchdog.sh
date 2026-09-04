@@ -40,7 +40,11 @@ MAX_KILLS=2 # then escalate: SIGKILL is not going to work on this process
 stale=0  # consecutive stale-heartbeat observations
 kills=0  # kill -9 attempts made
 
-while kill -0 "$wrapper" 2>/dev/null; do
+# kill -0 still succeeds while the wrapper is a zombie (its launcher has not
+# reaped it yet), which would spin this loop forever: /proc state Z counts as
+# exited. comm can contain spaces, so parse state from the closing paren.
+while kill -0 "$wrapper" 2>/dev/null &&
+    [ "$(sed -n 's/^.*) \([A-Z][A-Za-z]*\).*/\1/p' /proc/"$wrapper"/stat 2>/dev/null)" != "Z" ]; do
     if [ -f "$ping" ]; then
         now=$(date +%s)
         beat=$(stat -c %Y "$ping" 2>/dev/null || echo "$now")

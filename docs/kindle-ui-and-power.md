@@ -4,6 +4,8 @@
 
 前光开关和亮度编辑已经进设置页（`light.c` + 设置两行，走 `com.lab126.powerd`，不写配置文件）。本文是那之后还值得做的部分：过夜挂机还能省的电，以及设置/仪表盘上别扭的交互。
 
+**后续文档：** 本文的 P0/P1 项已经落地，核对与后续可行性见 [`kindle-light-and-battery.md`](kindle-light-and-battery.md)（前光/亮度现状、电量改画五格电池条）。另有独立需求 [`kindle-card-popup.md`](kindle-card-popup.md)：点卡片弹出放大框——它引入本文没有的两层东西（卡片命中层、局部模态 + `fbink_rect_dump`/`restore`），所以单独成篇。
+
 ---
 
 ## 1. 现状（已经够好的，不要再抠）

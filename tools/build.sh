@@ -23,20 +23,42 @@ make -C "$ROOT/kindle"
 [ -f "$ROOT/kindle/extension/bin/aiquota" ] || \
     die "make finished but kindle/extension/bin/aiquota is missing"
 
+# --- host unit tests ---------------------------------------------------------
+# The http cases need the fixture server from tests/test_main.c's header:
+# 127.0.0.1:18080 serving kindle/tests (index.txt). A busy port means no
+# fixture, and failing the build is the right outcome then.
+PYTHON=$(command -v python3 || true)
+[ -n "$PYTHON" ] || PYTHON="$HOME/fontenv/bin/python3"
+[ -x "$(command -v "$PYTHON" 2>/dev/null || echo "$PYTHON")" ] || die "python3 not found"
+command -v gcc >/dev/null 2>&1 || die "host gcc not found (make test needs it)"
+"$PYTHON" -m http.server 18080 --bind 127.0.0.1 -d "$ROOT/kindle/tests" >/dev/null 2>&1 &
+TEST_SRV=$!
+trap '[ "$TEST_SRV" ] && kill "$TEST_SRV" 2>/dev/null' EXIT
+sleep 1
+make -C "$ROOT/kindle" test || die "host unit tests failed"
+kill "$TEST_SRV" 2>/dev/null
+TEST_SRV=
+
 # --- font subset -----------------------------------------------------------
 [ -f "$ROOT/kindle/fonts/NotoSansSC.ttf" ] || \
     die "kindle/fonts/NotoSansSC.ttf not found"
 [ -x "$HOME/fontenv/bin/pyftsubset" ] || \
     die "$HOME/fontenv/bin/pyftsubset not found; create the fonttools venv first"
 
-grep -hoP '[\x{0080}-\x{FFFF}]' "$ROOT"/kindle/src/*.c | sort -u | tr -d '\n' \
+grep -hoP '[\x{0080}-\x{FFFF}]' "$ROOT"/kindle/src/*.c "$ROOT"/kindle/src/*.h | sort -u | tr -d '\n' \
     > "$ROOT/kindle/fonts/glyphs.txt"
+[ -s "$ROOT/kindle/fonts/glyphs.txt" ] || \
+    die "glyph extraction produced an empty file"
 "$HOME/fontenv/bin/pyftsubset" "$ROOT/kindle/fonts/NotoSansSC.ttf" \
     --text-file="$ROOT/kindle/fonts/glyphs.txt" --unicodes=U+0020-007E \
     --output-file="$ROOT/kindle/fonts/NotoSansSC-subset.ttf" --no-hinting --desubroutinize
 cp "$ROOT/kindle/fonts/NotoSansSC-subset.ttf" "$ROOT/kindle/extension/bin/NotoSansSC-subset.ttf"
 
 # --- verify binary ---------------------------------------------------------
+command -v file >/dev/null 2>&1 || \
+    die "'file' not found; cannot verify the ARM binary"
+command -v readelf >/dev/null 2>&1 || \
+    die "'readelf' not found; cannot verify static libfbink linkage"
 file "$ROOT/kindle/extension/bin/aiquota" | grep -q ARM || \
     die "kindle/extension/bin/aiquota is not an ARM binary"
 if readelf -d "$ROOT/kindle/extension/bin/aiquota" | grep NEEDED | grep -qi fbink; then

@@ -360,34 +360,192 @@ static void draw_info_card(const Ui *ui, int x, int y, const QuotaSnapshot *snap
     draw_info_block(ui, ix, iy, "采集", selected, "按接口名单显示");
 }
 
-static void draw_provider_slot(const Ui *ui, int slot, int y0, const char *title,
-                               const ProviderQuota *pq, const QuotaSnapshot *snap,
-                               const char *five_label, const char *monthly_label)
+static const ProviderQuota *card_quota(const QuotaSnapshot *snap, UiCard id)
 {
-    int x = ui->h_padding + (slot % 2) * (ui->card_w + ui->card_gap);
-    int y = y0 + (slot / 2) * (ui->card_h + ui->row_gap);
-
-    draw_provider_card(ui, x, y, title, pq, snap, five_label, monthly_label);
+    switch (id) {
+    case UI_CARD_GROK:
+        return &snap->grok;
+    case UI_CARD_CLAUDE:
+        return &snap->claude;
+    case UI_CARD_CODEX:
+        return &snap->codex;
+    case UI_CARD_KIMI:
+        return &snap->kimi;
+    case UI_CARD_OPENCODE:
+        return &snap->opencode;
+    case UI_CARD_AGY_GEMINI:
+        return &snap->agy.gemini;
+    case UI_CARD_AGY_THIRD:
+        return &snap->agy.third_party;
+    default:
+        return NULL;
+    }
 }
 
-static void draw_info_slot(const Ui *ui, int slot, int y0,
-                           const QuotaSnapshot *snap,
-                           const char *status_state, const char *status_detail)
+static void card_labels(UiCard id, const char **title, const char **five,
+                        const char **monthly)
 {
-    int x = ui->h_padding + (slot % 2) * (ui->card_w + ui->card_gap);
-    int y = y0 + (slot / 2) * (ui->card_h + ui->row_gap);
-
-    draw_info_card(ui, x, y, snap, status_state, status_detail);
+    *title = "";
+    *five = "5 小时";
+    *monthly = NULL;
+    switch (id) {
+    case UI_CARD_GROK:
+        *title = "Grok";
+        *monthly = "月额度";
+        break;
+    case UI_CARD_CLAUDE:
+        *title = "Claude Code";
+        break;
+    case UI_CARD_CODEX:
+        *title = "Codex";
+        break;
+    case UI_CARD_KIMI:
+        *title = "Kimi Code";
+        break;
+    case UI_CARD_OPENCODE:
+        *title = "OpenCode Go";
+        *five = "滚动 5h";
+        *monthly = "月额度";
+        break;
+    case UI_CARD_AGY_GEMINI:
+        *title = "AGY · Gemini";
+        break;
+    case UI_CARD_AGY_THIRD:
+        *title = "AGY · Claude/GPT";
+        break;
+    default:
+        break;
+    }
 }
 
-/* Title-bar right corner, drawn right to left: battery percent (with a
- * "充电" prefix on wall power), then the WiFi badge -- state dot + label,
+static void draw_card_at(const Ui *ui, int x, int y, UiCard id,
+                         const QuotaSnapshot *snap,
+                         const char *status_state, const char *status_detail)
+{
+    const char *title, *five, *monthly;
+    const ProviderQuota *pq;
+
+    if (id == UI_CARD_INFO) {
+        draw_info_card(ui, x, y, snap, status_state, status_detail);
+        return;
+    }
+    pq = card_quota(snap, id);
+    if (!pq)
+        return;
+    card_labels(id, &title, &five, &monthly);
+    draw_provider_card(ui, x, y, title, pq, snap, five, monthly);
+}
+
+static void slot_xy(const Ui *ui, int slot, int y0, int *x, int *y)
+{
+    *x = ui->h_padding + (slot % 2) * (ui->card_w + ui->card_gap);
+    *y = y0 + (slot / 2) * (ui->card_h + ui->row_gap);
+}
+
+static void register_card(Ui *ui, int slot, int y0, UiCard id)
+{
+    int x, y, i;
+
+    if (!ui || ui->card_drawn >= UI_CARD_SLOTS)
+        return;
+    slot_xy(ui, slot, y0, &x, &y);
+    i = ui->card_drawn;
+    ui->card_id[i] = id;
+    ui->card_rect[i].left = (unsigned short)x;
+    ui->card_rect[i].top = (unsigned short)y;
+    ui->card_rect[i].width = (unsigned short)ui->card_w;
+    ui->card_rect[i].height = (unsigned short)ui->card_h;
+    ui->card_drawn = i + 1;
+}
+
+/* Five-cell battery at the title-bar right edge. Pure rectangles (no new
+ * glyphs). Height matches the "充电" label; width is ui_scale(30) plus a
+ * 2px-logical nipple. 0 cells invert the body unless we are on wall power.
+ * Returns the width consumed from `right` leftward, 0 if nothing drawn. */
+static int draw_battery(const Ui *ui, int right, int y, int pct, int charging,
+                        int *out_h)
+{
+    const int cells = ui_batt_cells(pct);
+    const int invert = (cells == 0 && charging != 1);
+    int th = 0, tw = 0;
+    int frame, bar_w, bar_h, nip_w, nip_h, inner_w, inner_h, gap1;
+    int bar_x, left, i, cell_w, cx;
+
+    *out_h = 0;
+    if (cells < 0)
+        return 0;
+    if (ui_measure(ui, "充电", ui->px_detail, &tw, &th) != 0 || th <= 0)
+        th = ui->px_detail;
+    *out_h = th;
+
+    frame = ui_scale(ui, 1);
+    if (frame < 1)
+        frame = 1;
+    bar_h = th;
+    bar_w = ui_scale(ui, 30);
+    if (bar_w < 5 * frame + 5)
+        bar_w = 5 * frame + 5;
+    nip_w = ui_scale(ui, 2);
+    if (nip_w < 1)
+        nip_w = 1;
+    nip_h = bar_h / 2;
+    if (nip_h < 2)
+        nip_h = 2;
+
+    bar_x = right - bar_w - nip_w;
+    ui_fill(ui, bar_x, y, bar_w, bar_h, UI_INK_BLACK);
+    inner_w = bar_w - 2 * frame;
+    inner_h = bar_h - 2 * frame;
+    if (inner_w > 0 && inner_h > 0)
+        ui_fill(ui, bar_x + frame, y + frame, inner_w, inner_h,
+                invert ? UI_INK_BLACK : UI_INK_WHITE);
+    ui_fill(ui, bar_x + bar_w, y + (bar_h - nip_h) / 2, nip_w, nip_h,
+            UI_INK_BLACK);
+
+    gap1 = 1; /* 1px seam; DU is 1-bit, so this stays a hard white/black cut */
+    if (inner_w > 0 && inner_h > 0) {
+        int usable = inner_w - 4 * gap1;
+
+        if (usable < 5) {
+            usable = inner_w;
+            gap1 = 0;
+        }
+        cell_w = usable / 5;
+        if (cell_w < 1)
+            cell_w = 1;
+        cx = bar_x + frame;
+        for (i = 0; i < 5; i++) {
+            int cw = (i == 4) ? (bar_x + frame + inner_w) - cx : cell_w;
+
+            if (cw < 1)
+                cw = 1;
+            if (invert)
+                ui_fill(ui, cx, y + frame, cw, inner_h, UI_INK_WHITE);
+            else if (i < cells)
+                ui_fill(ui, cx, y + frame, cw, inner_h, UI_INK_BLACK);
+            cx += cw + gap1;
+        }
+    }
+
+    left = bar_x;
+    if (charging == 1 && tw > 0) {
+        int lg = ui_scale(ui, 5);
+
+        left = bar_x - lg - tw;
+        ui_text(ui, "充电", ui->px_detail, left, y, tw, th,
+                UI_ALIGN_LEFT, FG_BLACK, 0);
+    }
+    return right - left;
+}
+
+/* Title-bar right corner, drawn right to left: five-cell battery (with a
+ * "充电" label on wall power), then the WiFi badge -- state dot + label,
  * where the label is the current SSID when we have one and "WiFi" otherwise.
  * Everything comes from samples the caller took for this very render; the
  * badge adds no probes, timers or wakeups of its own.
  * Battery out of range and state < 0 each draw nothing: before the first
  * probe (or off-device) there is nothing to say. */
-static void draw_status_badges(const Ui *ui, int wifi_state, const char *ssid,
+static void draw_status_badges(Ui *ui, int wifi_state, const char *ssid,
                                int batt_pct, int batt_charging)
 {
     const int dot = ui_scale(ui, 6);
@@ -396,42 +554,60 @@ static void draw_status_badges(const Ui *ui, int wifi_state, const char *ssid,
     char text[48];
     int tw = 0, th = 0;
     int x = ui->w - ui->h_padding;
+    int right = x;
+    int min_x = x;
+    int max_h = 0;
 
-    if (batt_pct >= 0 && batt_pct <= 100) {
-        snprintf(text, sizeof(text),
-                 batt_charging == 1 ? "充电 %d%%" : "%d%%", batt_pct);
-        if (ui_measure(ui, text, ui->px_detail, &tw, &th) == 0 && tw > 0) {
-            x -= tw;
-            ui_text(ui, text, ui->px_detail, x, y, tw, th,
-                    UI_ALIGN_LEFT, FG_BLACK, 0);
+    ui->badge_rect.left = 0;
+    ui->badge_rect.top = 0;
+    ui->badge_rect.width = 0;
+    ui->badge_rect.height = 0;
+
+    {
+        int bh = 0;
+        int bw = draw_battery(ui, x, y, batt_pct, batt_charging, &bh);
+
+        if (bw > 0) {
+            x -= bw;
+            min_x = x;
+            if (bh > max_h)
+                max_h = bh;
             x -= gap;
         }
     }
 
-    if (wifi_state < 0)
-        return;
-    snprintf(text, sizeof(text), "%s",
-             (ssid && *ssid) ? ssid : "WiFi");
-    if (ui_measure(ui, text, ui->px_detail, &tw, &th) != 0 || th <= 0)
-        return;
-    /* Cap the label so a long SSID cannot run over the battery figure or
-     * the centered title; ui_text truncates with an ellipsis inside the box. */
-    {
-        int cap = ui->w * 3 / 10;
-        int box_w;
+    if (wifi_state >= 0) {
+        snprintf(text, sizeof(text), "%s",
+                 (ssid && *ssid) ? ssid : "WiFi");
+        if (ui_measure(ui, text, ui->px_detail, &tw, &th) == 0 && th > 0) {
+            /* Cap the label so a long SSID cannot run over the battery or
+             * the centered title; ui_text truncates with an ellipsis. */
+            int cap = ui->w * 3 / 10;
+            int box_w;
 
-        if (cap > x - dot - gap)
-            cap = x - dot - gap;
-        if (cap < 1)
-            return;
-        box_w = tw < cap ? tw : cap;
-        x -= box_w;
-        ui_text(ui, text, ui->px_detail, x, y, box_w, th,
-                UI_ALIGN_RIGHT, wifi_state > 0 ? FG_BLACK : FG_GRAY8, 0);
-        x -= gap + dot;
+            if (cap > x - dot - gap)
+                cap = x - dot - gap;
+            if (cap >= 1) {
+                box_w = tw < cap ? tw : cap;
+                x -= box_w;
+                ui_text(ui, text, ui->px_detail, x, y, box_w, th,
+                        UI_ALIGN_RIGHT, wifi_state > 0 ? FG_BLACK : FG_GRAY8, 0);
+                x -= gap + dot;
+                ui_fill(ui, x, y + (th - dot) / 2, dot, dot,
+                        wifi_state > 0 ? UI_INK_BLACK : UI_INK_GRAY);
+                min_x = x;
+                if (th > max_h)
+                    max_h = th;
+            }
+        }
     }
-    ui_fill(ui, x, y + (th - dot) / 2, dot, dot,
-            wifi_state > 0 ? UI_INK_BLACK : UI_INK_GRAY);
+
+    if (min_x < right && max_h > 0) {
+        ui->badge_rect.left = (unsigned short)min_x;
+        ui->badge_rect.top = (unsigned short)y;
+        ui->badge_rect.width = (unsigned short)(right - min_x);
+        ui->badge_rect.height = (unsigned short)max_h;
+    }
 }
 
 /* TitleBar port (quotapage.lua:257-287): centered title + subtitle, then a 1px
@@ -608,11 +784,14 @@ void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
                        int wifi_state, const char *ssid, int batt_pct, int batt_charging,
                        int auto_refresh_min)
 {
-    int card_count, rows, drawn_h, slack, y0, slot = 0;
+    UiCard ids[UI_CARD_SLOTS];
+    int card_count, rows, drawn_h, slack, y0, i;
 
     if (!ui || !snap)
         return;
 
+    ui->card_drawn = 0;
+    ui->btn_row_drawn = 0;
     fbink_cls(ui->fbfd, &ui->cfg_draw, NULL, false); /* white canvas, no refresh */
 
     draw_title_bar(ui, host, auto_refresh_min);
@@ -620,37 +799,21 @@ void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
 
     /* One card per ordinary provider, two for AGY, plus the always-visible
      * connection card. Disabled providers are omitted and the remaining
-     * cards pack left-to-right, top-to-bottom. */
-    card_count = 1 + snap->providers.grok + snap->providers.claude +
-                 snap->providers.codex + snap->providers.kimi +
-                 snap->providers.opencode + 2 * snap->providers.agy;
+     * cards pack left-to-right, top-to-bottom. Identity is stored next to
+     * each rect so a later tap cannot confuse slot number with card. */
+    card_count = ui_cards_from_providers(&snap->providers, ids, UI_CARD_SLOTS);
     rows = (card_count + 1) / 2;
     drawn_h = rows * ui->card_h + rows * ui->row_gap + ui->button_h;
     slack = ui->h - ui->title_h - drawn_h;
     y0 = ui->title_h + (slack > 0 ? slack / 2 : 0);
 
-    if (snap->providers.grok)
-        draw_provider_slot(ui, slot++, y0, "Grok", &snap->grok, snap,
-                           "5 小时", "月额度");
-    if (snap->providers.claude)
-        draw_provider_slot(ui, slot++, y0, "Claude Code", &snap->claude, snap,
-                           "5 小时", NULL);
-    if (snap->providers.codex)
-        draw_provider_slot(ui, slot++, y0, "Codex", &snap->codex, snap,
-                           "5 小时", NULL);
-    if (snap->providers.kimi)
-        draw_provider_slot(ui, slot++, y0, "Kimi Code", &snap->kimi, snap,
-                           "5 小时", NULL);
-    if (snap->providers.opencode)
-        draw_provider_slot(ui, slot++, y0, "OpenCode Go", &snap->opencode, snap,
-                           "滚动 5h", "月额度");
-    if (snap->providers.agy) {
-        draw_provider_slot(ui, slot++, y0, "AGY · Gemini", &snap->agy.gemini, snap,
-                           "5 小时", NULL);
-        draw_provider_slot(ui, slot++, y0, "AGY · Claude/GPT",
-                           &snap->agy.third_party, snap, "5 小时", NULL);
+    for (i = 0; i < card_count; i++) {
+        int x, y;
+
+        slot_xy(ui, i, y0, &x, &y);
+        draw_card_at(ui, x, y, ids[i], snap, status_state, status_detail);
+        register_card(ui, i, y0, ids[i]);
     }
-    draw_info_slot(ui, slot, y0, snap, status_state, status_detail);
 
     draw_buttons(ui, y0 + rows * ui->card_h + rows * ui->row_gap, loading);
 }
@@ -666,8 +829,7 @@ UiAction ui_hit_button(const Ui *ui, int x, int y)
     for (i = 0; i < 3; i++) {
         const FBInkRect *r = &ui->btn_rect[i];
 
-        if (x >= r->left && x < r->left + r->width &&
-            y >= r->top && y < r->top + r->height)
+        if (ui_rect_contains(r, x, y))
             return ui->btn_enabled[i] ? actions[i] : UI_ACTION_NONE;
     }
     return UI_ACTION_NONE;
@@ -714,4 +876,174 @@ void ui_flash_button(Ui *ui, int fbfd, UiAction action)
     ui_fill(ui, ui->btn_rect[1].left, row.top, 1, ui->button_h, UI_INK_GRAY);
     ui_fill(ui, ui->btn_rect[2].left, row.top, 1, ui->button_h, UI_INK_GRAY);
     ui_refresh(fbfd, &row, WFM_DU);
+}
+
+/* Popup chrome is one step thicker than a dashboard card's 1px frame. */
+static int popup_frame(const Ui *ui)
+{
+    int b = ui_scale(ui, 2);
+    return b < 2 ? 2 : b;
+}
+
+/* Scale a Ui copy so one card fills content_w minus the chrome. Derived
+ * heights (wb_h, card_h) are recomputed, not multiplied -- same as
+ * configure_vertical_metrics. The copy is paint-only. */
+static void scale_popup_ui(Ui *big, const Ui *ui)
+{
+    int frame = popup_frame(ui);
+    int inner_w = ui->content_w - 2 * frame;
+    int num, den;
+
+    *big = *ui;
+    if (inner_w < 1)
+        inner_w = ui->card_w;
+    den = ui->card_w > 0 ? ui->card_w : 1;
+    num = inner_w;
+    big->card_w = inner_w;
+    big->card_padding = ui->card_padding * num / den;
+    if (big->card_padding < 1)
+        big->card_padding = 1;
+    big->border = ui->border * num / den;
+    if (big->border < 1)
+        big->border = 1;
+    big->line_h = ui->line_h * num / den;
+    big->bar_h = ui->bar_h * num / den;
+    if (big->bar_h < 1)
+        big->bar_h = 1;
+    big->gap2 = ui->gap2 * num / den;
+    if (big->gap2 < 1)
+        big->gap2 = 1;
+    big->gap3 = ui->gap3 * num / den;
+    if (big->gap3 < 1)
+        big->gap3 = 1;
+    big->gap5 = ui->gap5 * num / den;
+    if (big->gap5 < 1)
+        big->gap5 = 1;
+    big->px_card_title = ui->px_card_title * num / den;
+    if (big->px_card_title < 1)
+        big->px_card_title = 1;
+    big->px_label = ui->px_label * num / den;
+    if (big->px_label < 1)
+        big->px_label = 1;
+    big->px_percent = ui->px_percent * num / den;
+    if (big->px_percent < 1)
+        big->px_percent = 1;
+    big->px_detail = ui->px_detail * num / den;
+    if (big->px_detail < 1)
+        big->px_detail = 1;
+    big->card_inner = big->card_w - 2 * (big->card_padding + big->border);
+    if (big->card_inner < 1)
+        big->card_inner = 1;
+    big->wb_h = big->line_h + big->bar_h + big->gap3 + big->line_h;
+    big->card_h = 2 * (big->card_padding + big->border) + big->line_h +
+                  3 * big->gap5 + 3 * big->wb_h;
+}
+
+static void popup_geom(const Ui *ui, const Ui *big, int *px, int *py, FBInkRect *out)
+{
+    int frame = popup_frame(ui);
+    int pop_w = big->card_w + 2 * frame;
+    int pop_h = big->card_h + 2 * frame;
+    int body_top = ui->title_h;
+    int body_h = ui->h - ui->title_h;
+    int x = ui->h_padding;
+    int y = body_top + (body_h - pop_h) / 2;
+
+    if (y < body_top)
+        y = body_top;
+    if (y + pop_h > ui->h)
+        y = ui->h - pop_h;
+    if (y < 0)
+        y = 0;
+    if (x < 0)
+        x = 0;
+    if (x + pop_w > ui->w)
+        x = ui->w - pop_w;
+    if (x < 0)
+        x = 0;
+    *px = x + frame;
+    *py = y + frame;
+    out->left = (unsigned short)x;
+    out->top = (unsigned short)y;
+    out->width = (unsigned short)pop_w;
+    out->height = (unsigned short)pop_h;
+}
+
+void ui_popup_rect(const Ui *ui, FBInkRect *out)
+{
+    Ui big;
+    int px, py;
+
+    if (!ui || !out)
+        return;
+    scale_popup_ui(&big, ui);
+    popup_geom(ui, &big, &px, &py, out);
+}
+
+void ui_popup_draw(const Ui *ui, const QuotaSnapshot *snap,
+                   const char *status_state, const char *status_detail,
+                   UiCard id, FBInkRect *out)
+{
+    Ui big;
+    FBInkRect r;
+    int px, py;
+
+    if (!ui || !snap || id == UI_CARD_NONE)
+        return;
+    scale_popup_ui(&big, ui);
+    popup_geom(ui, &big, &px, &py, &r);
+    ui_fill(ui, r.left, r.top, r.width, r.height, UI_INK_BLACK);
+    draw_card_at(&big, px, py, id, snap, status_state, status_detail);
+    if (out)
+        *out = r;
+}
+
+void ui_redraw_badges(Ui *ui, int wifi_state, const char *ssid,
+                      int batt_pct, int batt_charging, FBInkRect *out)
+{
+    FBInkRect old;
+    int x0, y0, w0, h0, right;
+
+    if (!ui)
+        return;
+
+    old = ui->badge_rect;
+    right = ui->w - ui->h_padding;
+    x0 = old.width ? (int)old.left : ui->w * 7 / 10;
+    y0 = old.height ? (int)old.top : ui_scale(ui, 18);
+    h0 = old.height ? (int)old.height : ui->px_detail;
+    if (x0 < 0)
+        x0 = 0;
+    w0 = right - x0;
+    if (w0 < 1 || h0 < 1)
+        return;
+
+    /* Clear only the previous badge strip, not the whole title-bar corner:
+     * a taller wipe would punch a hole in the centered title/subtitle. */
+    ui_fill(ui, x0, y0, w0, h0, UI_INK_WHITE);
+    draw_status_badges(ui, wifi_state, ssid, batt_pct, batt_charging);
+
+    if (out) {
+        int left = x0, top = y0, bot = y0 + h0, rgt = x0 + w0;
+        const FBInkRect *n = &ui->badge_rect;
+
+        if (n->width) {
+            if ((int)n->left < left)
+                left = (int)n->left;
+            if ((int)n->top < top)
+                top = (int)n->top;
+            if ((int)n->left + (int)n->width > rgt)
+                rgt = (int)n->left + (int)n->width;
+            if ((int)n->top + (int)n->height > bot)
+                bot = (int)n->top + (int)n->height;
+        }
+        if (left < 0)
+            left = 0;
+        if (top < 0)
+            top = 0;
+        out->left = (unsigned short)left;
+        out->top = (unsigned short)top;
+        out->width = (unsigned short)(rgt > left ? rgt - left : 0);
+        out->height = (unsigned short)(bot > top ? bot - top : 0);
+    }
 }

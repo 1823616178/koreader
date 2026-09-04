@@ -4,7 +4,7 @@
 # and the four absolute paths are rewritten to point inside it.
 set -u
 T=/tmp/wdtest
-SRC=/mnt/g/code/koread_ext/kindle/extension/bin
+SRC=$(CDPATH= cd -- "$(dirname -- "$0")/../extension/bin" && pwd)
 WD="$T/bin/watchdog.sh"
 rm -rf "$T"; mkdir -p "$T/bin"
 
