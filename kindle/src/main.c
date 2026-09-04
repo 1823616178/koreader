@@ -26,6 +26,7 @@
 #include "http.h"
 #include "input.h"
 #include "keypad.h"
+#include "light.h"
 #include "net.h"
 #include "quota.h"
 #include "settings.h"
@@ -148,6 +149,13 @@ static void install_signal_handlers(void)
  * while the straddle odds are ~1 in 50 000 taps. */
 #define TAP_WAIT_CHUNK_S 300
 
+/* Idle frontlight timeout (docs/kindle-ui-and-power.md P0): the parked
+ * dashboard's biggest avoidable draw is the LED, so it drops to 0 after
+ * this many seconds without a touch on the dashboard and comes back on the
+ * next one. First version is fixed -- no config row; if it ever wants a
+ * knob, that is a new key, not a reuse of an existing one. */
+#define LIGHT_IDLE_OFF_S (3 * 60)
+
 /* One tap wait, wrapped in the heartbeat contract (see watchdog.h): each
  * segment announces its own bound before blocking, then the short local-work
  * bound takes over. With this, the app has no unbounded wait left anywhere,
@@ -215,19 +223,27 @@ static const char *api_host(const char *url)
     return host;
 }
 
-/* One full-screen GC16 refresh after a complete redraw. The ui/keypad
+/* One full-screen refresh after a complete redraw. The ui/keypad
  * modules draw everything with their own no_refresh configs; main only
- * issues refreshes once a full frame is drawn (UIManager:setDirty style). */
-static void full_refresh(int fbfd)
+ * issues refreshes once a full frame is drawn (UIManager:setDirty style).
+ * The waveform is the caller's call: GC16 for real content changes, GL16
+ * when the frame was repainted from identical data and fidelity does not
+ * justify a flash. */
+static void full_refresh_mode(int fbfd, int wfm_mode)
 {
     FBInkConfig rcfg;
 
     memset(&rcfg, 0, sizeof(rcfg));
     rcfg.no_refresh = false;
-    rcfg.wfm_mode = WFM_GC16; /* full high-fidelity re-render */
+    rcfg.wfm_mode = (WFM_MODE_INDEX_T)wfm_mode;
     /* An empty region (0x0 @ 0,0) means a full-screen refresh; the header
      * marks fbink_refresh_rect's rect nonnull, so use fbink_refresh. */
     fbink_refresh(fbfd, 0, 0, 0, 0, &rcfg);
+}
+
+static void full_refresh(int fbfd)
+{
+    full_refresh_mode(fbfd, WFM_GC16); /* full high-fidelity re-render */
 }
 
 /* --- what the panel currently shows ---------------------------------------
@@ -262,7 +278,8 @@ static unsigned long long frame_sig_of(const char *status, const char *src)
 
 /* LOADING paint: empty skeleton + "connecting" card, like quotapage.lua's
  * onShow drawing the skeleton before fetch() runs. */
-static void paint_loading(int fbfd, Ui *ui, const char *host, const char *api_url)
+static void paint_loading(int fbfd, Ui *ui, const char *host, const char *api_url,
+                          int auto_refresh_min)
 {
     QuotaSnapshot empty;
     char ssid[33]; /* 802.11 SSIDs cap at 32 octets */
@@ -272,7 +289,7 @@ static void paint_loading(int fbfd, Ui *ui, const char *host, const char *api_ur
     net_battery(&batt, &chg);
     net_wifi_ssid(ssid, sizeof(ssid));
     ui_draw_dashboard(ui, &empty, host, "连接中", api_url, 1,
-                      net_wifi_state(), ssid, batt, chg);
+                      net_wifi_state(), ssid, batt, chg, auto_refresh_min);
     full_refresh(fbfd);
     frame_is_dashboard = 0; /* whatever lands next must be painted in full */
 }
@@ -281,13 +298,19 @@ static void paint_loading(int fbfd, Ui *ui, const char *host, const char *api_ur
  * A successful parse replaces *snap; on error the last good snapshot is kept
  * (or an empty one when nothing ever succeeded), and detail carries the URL
  * or the error text. release_wifi: hand the radio back after the attempt
- * (only effective when net.c actually raised it). Returns ST_READY/ST_ERROR.
+ * (only effective when net.c actually raised it). auto_cycle: the cycle was
+ * timer-driven -- its repaint lands with GL16 (nobody asked for the update,
+ * so it does not justify a GC16 flash; the signature test above already
+ * removed the no-change case). User-driven cycles (refresh tap, URL edit)
+ * keep GC16, whose full flash is also what periodically clears ghosting.
+ * Returns ST_READY/ST_ERROR.
  * The repaint at the end is skipped when the panel already shows exactly
  * this content (same signature, same battery badge and a dashboard rather
  * than a skeleton is up): an auto-refresh cycle that changed nothing then
  * costs the radio wake-up and nothing else -- no e-ink flash. */
 static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
                     QuotaSnapshot *snap, int *have_good, int demo,
+                    int auto_refresh_min, int auto_cycle,
                     char *detail, size_t detail_size, int release_wifi)
 {
     QuotaSnapshot fresh;
@@ -364,13 +387,14 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
             return st;
         }
         ui_draw_dashboard(ui, snap, host, st == ST_ERROR ? "失败" : "已连接",
-                          detail, 0, net_wifi_state(), ssid, batt, chg);
+                          detail, 0, net_wifi_state(), ssid, batt, chg,
+                          auto_refresh_min);
         frame_is_dashboard = 1;
         frame_sig = sig;
         frame_batt = batt;
         frame_chg = chg;
     }
-    full_refresh(fbfd);
+    full_refresh_mode(fbfd, auto_cycle ? WFM_GL16 : WFM_GC16);
     return st;
 }
 
@@ -437,6 +461,8 @@ static void dump_state(const FBInkState *st)
         net_battery(&batt, &chg);
         printf("battery_level=%d\n", batt);
         printf("battery_charging=%d\n", chg);
+        printf("frontlight_intensity=%d\n", light_get_intensity());
+        printf("frontlight_max=%d\n", light_get_max());
     }
 }
 
@@ -588,6 +614,7 @@ int main(int argc, char **argv)
     const char *host;
     char detail[DETAIL_SIZE];
     time_t last_fetch;      /* when the current dashboard data was fetched */
+    long idle_deadline;     /* wall-clock second the frontlight dims at */
     int have_good = 0;
     int have_cfg_file;
     int mode = MODE_NORMAL;
@@ -681,6 +708,7 @@ int main(int argc, char **argv)
     quota_empty_snapshot(&snap);
     detail[0] = '\0';
     last_fetch = time(NULL);
+    idle_deadline = (long)time(NULL) + LIGHT_IDLE_OFF_S;
 
     if (mode == MODE_DEMO) {
         /* Render the embedded sample, once, even without a touch device. */
@@ -698,7 +726,8 @@ int main(int argc, char **argv)
             net_battery(&batt, &chg); /* real figures; network untouched */
             net_wifi_ssid(ssid, sizeof(ssid));
             ui_draw_dashboard(ui, &snap, host, "已连接", detail, 0,
-                              net_wifi_state(), ssid, batt, chg);
+                              net_wifi_state(), ssid, batt, chg,
+                              cfg.auto_refresh_min);
             frame_is_dashboard = 1;
             frame_sig = frame_sig_of("已连接", DEMO_JSON);
             frame_batt = batt;
@@ -720,32 +749,49 @@ int main(int argc, char **argv)
         int x = 0, y = 0;
         int wr;
         long deadline;
+        long auto_deadline;
         UiAction action;
 
         if (st == ST_LOADING) {
             wd_expect(WD_STEP_S); /* net.c and http.c re-arm per blocking phase */
             if (!auto_cycle)
-                paint_loading(fbfd, ui, host, cfg.api_url);
+                paint_loading(fbfd, ui, host, cfg.api_url,
+                              cfg.auto_refresh_min);
             st = do_fetch(fbfd, ui, cfg.api_url, host, &snap, &have_good,
-                          mode == MODE_DEMO, detail, sizeof(detail),
-                          cfg.wifi_auto_off);
+                          mode == MODE_DEMO, cfg.auto_refresh_min, auto_cycle,
+                          detail, sizeof(detail), cfg.wifi_auto_off);
             last_fetch = time(NULL); /* auto-refresh counts from this data */
             auto_cycle = 0;
         }
 
-        /* READY/ERROR: park on one blocked poll until the next tap or,
-         * with auto-refresh on, the tick -- the only deadline left now
-         * that the idle exit is gone. Taps queued in the kernel evdev
+        /* READY/ERROR: park on one blocked poll until the next tap or the
+         * earlier of two deadlines -- the auto-refresh tick and the idle
+         * frontlight (a touch re-arms both). Taps queued in the kernel evdev
          * buffer while a fetch runs stay hit-testable against the NEW
-         * screen. An overdue deadline (e.g. time spent in settings)
-         * returns 1 immediately and fetches right away. */
-        deadline = cfg.auto_refresh_min > 0
-                       ? (long)last_fetch + (long)cfg.auto_refresh_min * 60
-                       : 0;
+         * screen. An overdue deadline (e.g. time spent in settings) returns
+         * 1 immediately and fetches right away. */
+        auto_deadline = cfg.auto_refresh_min > 0
+                            ? (long)last_fetch + (long)cfg.auto_refresh_min * 60
+                            : 0;
+        deadline = auto_deadline;
+        if (idle_deadline > 0 && (deadline == 0 || idle_deadline < deadline))
+            deadline = idle_deadline;
         wr = wait_tap_until(input_fd, scr_w, scr_h, &cfg, deadline, &x, &y);
         if (wr > 0) {
-            auto_cycle = 1;
-            st = ST_LOADING;
+            long now = (long)time(NULL);
+
+            /* The expiry may have been the light, the refresh, or both:
+             * test each against its own deadline instead of assuming the
+             * earlier one. The light-off must not drag the app through
+             * ST_LOADING -- only the refresh does. */
+            if (idle_deadline > 0 && now >= idle_deadline) {
+                light_idle_off(); /* remembers the level for the next touch */
+                idle_deadline = 0;
+            }
+            if (auto_deadline > 0 && now >= auto_deadline) {
+                auto_cycle = 1;
+                st = ST_LOADING;
+            }
             continue;
         }
         if (wr < 0) {
@@ -753,6 +799,11 @@ int main(int argc, char **argv)
             rc = 1;
             goto out;
         }
+        /* Restore an idle-dimmed light before the hit-test, so the wake tap
+         * still lands on whatever the user aimed at (the first tap acts, it
+         * does not just wake). No-op when the light was not dimmed by us. */
+        light_idle_restore();
+        idle_deadline = (long)time(NULL) + LIGHT_IDLE_OFF_S;
         action = ui_hit_button(ui, x, y);
         if (action == UI_ACTION_NONE)
             continue;
@@ -814,7 +865,7 @@ int main(int argc, char **argv)
                     if (hit == SET_HIT_EDIT_URL) {
                         snprintf(edit, sizeof(edit), "%s", settings_url(sp));
                         keypad_draw(kp, "接口地址", edit);
-                    } else {
+                    } else if (hit == SET_HIT_EDIT_REFRESH) {
                         snprintf(edit, sizeof(edit), "%d",
                                  settings_refresh_min(sp));
                         keypad_draw(kp, "自动刷新(分钟)", edit);
@@ -841,7 +892,7 @@ int main(int argc, char **argv)
 
                             config_normalize_url(norm, sizeof(norm), edit);
                             url_changed |= settings_set_url(sp, norm);
-                        } else {
+                        } else if (hit == SET_HIT_EDIT_REFRESH) {
                             settings_set_refresh_min(sp, atoi(edit));
                         }
                     }
@@ -869,21 +920,31 @@ int main(int argc, char **argv)
                 net_wifi_ssid(ssid, sizeof(ssid));
                 ui_draw_dashboard(ui, &snap, host,
                                   st == ST_ERROR ? "失败" : "已连接",
-                                  detail, 0, net_wifi_state(), ssid, batt, chg);
+                                  detail, 0, net_wifi_state(), ssid, batt, chg,
+                                  cfg.auto_refresh_min);
                 /* Same data and status as the frame before the settings
                  * page: keep its signature, adopt the fresher battery
                  * figures so the skip test stays honest. */
                 frame_is_dashboard = 1;
                 frame_batt = batt;
                 frame_chg = chg;
-                full_refresh(fbfd);
+                /* The frame was repainted from the same snapshot (only the
+                 * config keys / the frontlight / the auto-refresh line can
+                 * differ): GL16 wakes the panel without the GC16 flash. */
+                full_refresh_mode(fbfd, WFM_GL16);
             }
+            /* Time spent editing does not count as dashboard idle. */
+            idle_deadline = (long)time(NULL) + LIGHT_IDLE_OFF_S;
         }
     }
 
 out:
     /* Clean exit (0) or device loss (1): either way the wrapper script's
-     * EXIT trap brings the Kindle framework back. */
+     * EXIT trap brings the Kindle framework back. An idle-dimmed light gets
+     * its level back first: leaving the dashboard must not hand powerd a 0
+     * the user never chose. A light turned off by hand is never pending and
+     * stays off. */
+    light_idle_restore();
     if (kp)
         keypad_destroy(kp);
     if (ui)

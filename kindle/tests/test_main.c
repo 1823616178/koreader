@@ -24,6 +24,7 @@
 #include "config.h"
 #include "http.h"
 #include "input.h"
+#include "light.h"
 #include "net.h"
 #include "quota.h"
 #include "watchdog.h"
@@ -636,6 +637,33 @@ static void test_input_transform(void)
     check_transform(0, 0, 0, 600, 800, 100, 2048, 100, 100, 0, 4095, 0, 399);
 }
 
+static void test_light_clamp_and_no_lipc(void)
+{
+    CHECK(light_clamp(-7, 24) == 0);
+    CHECK(light_clamp(0, 24) == 0);
+    CHECK(light_clamp(12, 24) == 12);
+    CHECK(light_clamp(24, 24) == 24);
+    CHECK(light_clamp(99, 24) == 24);
+    /* max < 1 falls back to LIGHT_MAX_FALLBACK (24). */
+    CHECK(light_clamp(5, 0) == 5);
+    CHECK(light_clamp(99, -3) == LIGHT_MAX_FALLBACK);
+    CHECK(light_clamp(-1, 0) == 0);
+
+    /* Host has no lipc: get/set must return -1 without crashing. */
+    CHECK(light_get_intensity() == -1);
+    CHECK(light_get_max() == -1);
+    CHECK(light_set_intensity(10) == -1);
+    CHECK(light_set_intensity(0) == -1);
+
+    /* Idle-off bookkeeping degrades to a no-op without lipc: nothing can be
+     * dimmed, nothing stays remembered, restore/cancel stay safe. */
+    CHECK(light_idle_off() == 0);
+    CHECK(light_idle_level() == 0);
+    CHECK(light_idle_restore() == 0);
+    light_idle_cancel();
+    CHECK(light_idle_level() == 0);
+}
+
 static void test_net_ensure_wifi_no_lipc(void)
 {
     /* The host has no lipc binaries: net_ensure_wifi must return -1
@@ -925,6 +953,7 @@ int main(void)
     RUN(test_wd_should_beat);
     RUN(test_net_sanitize_ssid);
     RUN(test_net_ensure_wifi_no_lipc);
+    RUN(test_light_clamp_and_no_lipc);
 
     if (failures == 0) {
         printf("ALL PASS\n");

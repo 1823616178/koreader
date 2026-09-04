@@ -19,7 +19,7 @@ $(BIN): $(SRCS) $(wildcard src/*.h) third_party/cJSON/cJSON.h third_party/fbink/
 test:
 	gcc -std=c99 -Wall -Wextra -Werror -Isrc -Ithird_party/cJSON \
 	    -o /tmp/aiquota_test tests/test_main.c src/config.c src/quota.c src/http.c \
-	    src/input.c src/net.c src/watchdog.c third_party/cJSON/cJSON.c -lpthread
+	    src/input.c src/net.c src/light.c src/watchdog.c third_party/cJSON/cJSON.c -lpthread
 	/tmp/aiquota_test
 
 clean:

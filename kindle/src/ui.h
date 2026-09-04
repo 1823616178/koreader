@@ -20,10 +20,13 @@ void ui_destroy(Ui *ui);
  * ssid: sanitized SSID shown instead of the "WiFi" label when non-empty.
  * batt_pct: 0-100, out of range -> no battery text; batt_charging: 1 shows
  * "充电 N%", 0/other "N%". All three are sampled by the caller at render
- * points only -- drawing them adds no wakeups on the e-ink device. */
+ * points only -- drawing them adds no wakeups on the e-ink device.
+ * auto_refresh_min: 0 shows a gray "自动刷新关闭" second subtitle line,
+ * > 0 "自动刷新 N 分钟" -- dead text, no timer behind it. */
 void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
                        const char *status_state, const char *status_detail, int loading,
-                       int wifi_state, const char *ssid, int batt_pct, int batt_charging);
+                       int wifi_state, const char *ssid, int batt_pct, int batt_charging,
+                       int auto_refresh_min);
 
 /* Hit-test the bottom button row (screen-space tap coords). Disabled buttons return UI_ACTION_NONE. */
 UiAction ui_hit_button(const Ui *ui, int x, int y);

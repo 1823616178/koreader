@@ -436,20 +436,30 @@ static void draw_status_badges(const Ui *ui, int wifi_state, const char *ssid,
 
 /* TitleBar port (quotapage.lua:257-287): centered title + subtitle, then a 1px
  * black hairline across the full width. No close icon (the 关闭 button covers
- * it; the subset font has no X glyph). */
-static void draw_title_bar(const Ui *ui, const char *host)
+ * it; the subset font has no X glyph). A second subtitle line carries dead
+ * text for the auto-refresh state (docs/kindle-ui-and-power.md P1): parked
+ * users can tell at a glance whether the page will update itself, without a
+ * countdown that would force periodic redraws. */
+static void draw_title_bar(const Ui *ui, const char *host, int auto_refresh_min)
 {
     const char *title = "AI 额度";
     const char *sub = (host && *host) ? host : "未配置";
-    int tw = 0, th = 0, sw = 0, sh = 0;
+    char auto_line[32];
+    int tw = 0, th = 0, sw = 0, sh = 0, ah = 0;
     int total, ty;
+
+    snprintf(auto_line, sizeof(auto_line),
+             auto_refresh_min > 0 ? "自动刷新 %d 分钟" : "自动刷新关闭",
+             auto_refresh_min);
 
     if (ui_measure(ui, title, ui->px_title, &tw, &th) != 0 || th <= 0)
         th = ui->px_title + ui->px_title / 2;
     if (ui_measure(ui, sub, ui->px_subtitle, &sw, &sh) != 0 || sh <= 0)
         sh = ui->px_subtitle + ui->px_subtitle / 2;
+    if (ui_measure(ui, auto_line, ui->px_subtitle, &sw, &ah) != 0 || ah <= 0)
+        ah = sh;
 
-    total = th + ui->gap2 + sh;
+    total = th + ui->gap2 + sh + ui->gap2 + ah;
     ty = (ui->title_h - 1 - total) / 2;
     if (ty < 0)
         ty = 0;
@@ -457,6 +467,9 @@ static void draw_title_bar(const Ui *ui, const char *host)
     ui_text(ui, title, ui->px_title, 0, ty, ui->w, th, UI_ALIGN_CENTER, FG_BLACK, 0);
     ui_text(ui, sub, ui->px_subtitle, 0, ty + th + ui->gap2, ui->w, sh,
             UI_ALIGN_CENTER, FG_BLACK, 0);
+    ui_text(ui, auto_line, ui->px_subtitle, 0, ty + th + ui->gap2 + sh + ui->gap2,
+            ui->w, ah, UI_ALIGN_CENTER,
+            auto_refresh_min > 0 ? FG_BLACK : FG_GRAY8, 0);
     ui_fill(ui, 0, ui->title_h - 1, ui->w, 1, UI_INK_BLACK);
 }
 
@@ -592,7 +605,8 @@ void ui_destroy(Ui *ui)
 
 void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
                        const char *status_state, const char *status_detail, int loading,
-                       int wifi_state, const char *ssid, int batt_pct, int batt_charging)
+                       int wifi_state, const char *ssid, int batt_pct, int batt_charging,
+                       int auto_refresh_min)
 {
     int card_count, rows, drawn_h, slack, y0, slot = 0;
 
@@ -601,7 +615,7 @@ void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
 
     fbink_cls(ui->fbfd, &ui->cfg_draw, NULL, false); /* white canvas, no refresh */
 
-    draw_title_bar(ui, host);
+    draw_title_bar(ui, host, auto_refresh_min);
     draw_status_badges(ui, wifi_state, ssid, batt_pct, batt_charging);
 
     /* One card per ordinary provider, two for AGY, plus the always-visible

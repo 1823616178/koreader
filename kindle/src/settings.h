@@ -6,15 +6,17 @@
 #include "ui.h"
 
 /* In-app settings page, same full-screen modal pattern as keypad.c (the system
- * UI is frozen, so every control is ours): three tappable rows over a Keypad
- * for the numeric/url fields, plus a 返回 button. Rows map 1:1 onto AppConfig
- * keys; edits land in a working copy and only reach the real config through
- * settings_commit(), so 取消-style abandonment stays trivial. */
+ * UI is frozen, so every control is ours): tappable rows -- a shared Keypad
+ * covers 接口地址 / 自动刷新, 刷新后关WiFi is a toggle, 前光 combines the
+ * on/off toggle with an inline -/+ level stepper (applied to powerd per
+ * click) -- plus a 返回 button. AppConfig rows land in a working copy and
+ * only reach the real config through settings_commit(); 前光 talks to powerd
+ * immediately and is not a config key. */
 
 typedef struct Settings Settings;
 
 typedef enum {
-    SET_HIT_NONE = 0,   /* consumed here (toggle flip / stray tap) */
+    SET_HIT_NONE = 0,   /* consumed here (toggle flip / stepper / stray tap) */
     SET_HIT_BACK,       /* leave the page: caller commits + saves */
     SET_HIT_EDIT_URL,   /* open the shared Keypad on this field */
     SET_HIT_EDIT_REFRESH
@@ -29,9 +31,10 @@ void settings_destroy(Settings *s);
  * one GC16 refresh afterwards (keypad_draw contract). */
 void settings_draw(Settings *s);
 
-/* Hit-test one screen-space tap. Toggling WiFi auto-off flips the value and
- * repaints its row with a DU refresh before returning SET_HIT_NONE; editor
- * rows flash their feedback and hand control back to the caller. */
+/* Hit-test one screen-space tap. Toggling WiFi auto-off or 前光 flips the
+ * value and repaints with a DU refresh before returning SET_HIT_NONE; the
+ * 前光 stepper applies each click to powerd the same way; editor rows flash
+ * their feedback and hand control back to the caller. */
 SettingsHit settings_handle_tap(Settings *s, int fbfd, int x, int y);
 
 /* Current values, e.g. to seed the keypad's echo line. */
