@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#include "quota.h"
+
 #define CONFIG_DEFAULT_API_BASE "http://123.161.179.32:46927"
 #define CONFIG_PATH "/mnt/us/extensions/aiquota/config"
 
@@ -20,6 +22,11 @@
 #define CONFIG_AUTO_REFRESH_DEFAULT 0
 #define CONFIG_AUTO_REFRESH_MAX 60
 
+/* F02: local ordered visibility list. Comma-separated provider ids; order is
+ * card/request order. Does NOT call PUT /api/providers. */
+#define CONFIG_PROVIDERS_DEFAULT "grok,claude,codex,kimi,opencode,agy"
+#define CONFIG_PROVIDERS_MAX 6
+
 typedef struct {
     char api_url[512];   /* normalized path ends with /api/usage; optional query follows */
     int touch_swap_xy;   /* 0 or 1: swap touch X/Y axes */
@@ -27,17 +34,60 @@ typedef struct {
     int touch_mirror_y;  /* 0 or 1: y = height - 1 - y */
     int wifi_auto_off;   /* 0/1: drop the WiFi we raised once a fetch is done */
     int auto_refresh_min;/* minutes between automatic re-fetches; 0 = off */
+    int light_idle_off_min; /* F06: 0=disable idle light-off, 1-60 minutes */
+    int display_mode_pref; /* F04: 0=API, 1=used, 2=remain, 3=large, 4=compact */
+    int refresh_preset;    /* F05: 0=custom/off via minutes, 1=manual, 2=normal, 3=night */
+    int config_version;    /* F07: bumped on breaking config migrations */
+    char show_providers[128]; /* F02: ordered CSV of enabled providers */
 } AppConfig;
+
+#define CONFIG_LIGHT_IDLE_DEFAULT 3
+#define CONFIG_LIGHT_IDLE_MAX 60
+#define CONFIG_VERSION_CURRENT 2
+#define CONFIG_CACHE_PATH "/mnt/us/extensions/aiquota/cache.json"
 
 void config_defaults(AppConfig *cfg);
 /* Loads key=value file over the defaults. Missing file is fine: returns -1, defaults kept. */
 int  config_load(AppConfig *cfg, const char *path);
+/* Like config_load, but if primary fails tries path.bak and may rewrite primary. */
+int  config_load_with_backup(AppConfig *cfg, const char *path);
 int  config_save(const AppConfig *cfg, const char *path);
 /* Normalize URL: trim -> default if empty -> add http:// if no scheme ->
  * strip the path's trailing '/' -> append /api/usage if missing -> preserve query. */
 void config_normalize_url(char *dst, size_t dst_size, const char *src);
 /* Clamp into [1, CONFIG_AUTO_REFRESH_MAX]; <= 0 -> 0 (off). */
 int  config_clamp_auto_refresh(int mins);
+int  config_clamp_light_idle(int mins);
+/* F07: bump old configs to CONFIG_VERSION_CURRENT; returns 1 if mutated. */
+int  config_migrate(AppConfig *cfg);
+/* F01: atomic JSON snapshot cache bound to api_url. */
+int  config_cache_save(const char *path, const char *api_url,
+                      const char *json_body, long long saved_at_ms);
+int  config_cache_load(const char *path, const char *api_url,
+                      char *json_out, size_t json_out_size,
+                      long long *saved_at_ms);
+
+/* --- F02 provider preference helpers (host-testable) -------------------- */
+/* Known provider name? 1/0. */
+int  config_provider_known(const char *name);
+/* Normalize CSV: keep known names, dedupe, preserve first-seen order.
+ * Empty / all-invalid -> writes CONFIG_PROVIDERS_DEFAULT (never all-off).
+ * Returns count of enabled names. */
+int  config_providers_normalize(char *dst, size_t dst_size, const char *src);
+int  config_providers_count(const char *list);
+void config_providers_to_selection(const char *list, ProviderSelection *out);
+/* Toggle one known name. Refuses clearing the last enabled name (returns -1
+ * and leaves dst unchanged). Returns 0 on success, -1 on refuse/unknown. */
+int  config_providers_toggle(char *dst, size_t dst_size, const char *name);
+/* Move name one step toward the list head (dir<0) or tail (dir>0). */
+int  config_providers_move(char *dst, size_t dst_size, const char *name, int dir);
+/* Build fetch URL: drop existing providers/tools/tool/provider query keys,
+ * append providers=<show_providers>. Base path/other query preserved. */
+int  config_url_with_providers(char *dst, size_t dst_size,
+                               const char *base_url, const char *show_providers);
+/* F05: map preset to minutes; 0 custom leaves minutes alone. */
+int  config_refresh_preset_minutes(int preset);
+void config_apply_refresh_preset(AppConfig *cfg);
 
 /* Legacy note: config files written by older builds may still contain an
  * idle_timeout_s=N line. The loader ignores unknown keys, so such files load

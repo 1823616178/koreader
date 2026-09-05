@@ -4,6 +4,9 @@
 #include "fbink.h"
 #include "quota.h"
 
+#include <stdio.h>
+#include <string.h>
+
 typedef struct Ui Ui;   /* fb geometry, scale factor, computed layout, button rects */
 
 typedef enum { UI_ACTION_NONE = 0, UI_ACTION_REFRESH, UI_ACTION_SETTINGS, UI_ACTION_CLOSE } UiAction;
@@ -29,6 +32,8 @@ enum { UI_CARD_SLOTS = 9 };
  * Returns NULL on failure (bad font_path/OOM); caller must check. */
 Ui  *ui_create(int fbfd, int screen_w, int screen_h, int dpi, const char *font_path);
 void ui_destroy(Ui *ui);
+/* F02: set local provider order used by ui_draw_dashboard packing. */
+void ui_set_provider_order(Ui *ui, const char *order_csv);
 
 /* Full dashboard redraw (everything drawn with no_refresh); caller issues one fbink_refresh_rect.
  * host: title-bar subtitle (may be NULL -> "未配置").
@@ -54,6 +59,7 @@ void ui_flash_button(Ui *ui, int fbfd, UiAction action);
 
 /* Screen rectangle the card popup will occupy (for dump/restore). */
 void ui_popup_rect(const Ui *ui, FBInkRect *out);
+void ui_popup_rect_for(const Ui *ui, UiCard id, FBInkRect *out);
 
 /* Vector-redraw one card into a centered popup. Does not refresh; *out is
  * the popup rectangle (same as ui_popup_rect). The Ui copy used for the
@@ -61,6 +67,82 @@ void ui_popup_rect(const Ui *ui, FBInkRect *out);
 void ui_popup_draw(const Ui *ui, const QuotaSnapshot *snap,
                    const char *status_state, const char *status_detail,
                    UiCard id, FBInkRect *out);
+/* Info-card popup: multi-line detail with optional paging (R07).
+ * page is 0-based; ui_popup_info_pages() reports how many pages the
+ * current detail needs. ui_popup_hit() returns 0=close, 1=prev,
+ * 2=next, -1=ignore (e.g. empty chrome). */
+int  ui_popup_info_pages(const Ui *ui, const char *status_detail);
+void ui_popup_draw_ex(const Ui *ui, const QuotaSnapshot *snap,
+                     const char *status_state, const char *status_detail,
+                     UiCard id, int page, FBInkRect *out);
+int  ui_popup_hit(const Ui *ui, const FBInkRect *pop, UiCard id,
+                 int pages, int x, int y);
+/* Pure wrap helper (host-testable): split UTF-8 into lines of at most
+ * max_bytes bytes (column budget by UTF-8 codepoints ~3 bytes for CJK).
+ * Copies into scratch; lines[] point into scratch. Returns line count. */
+static inline int ui_wrap_utf8_lines(const char *text, int max_bytes,
+                                     char *scratch, size_t scratch_n,
+                                     const char **lines, int max_lines)
+{
+    size_t pos = 0;
+    int nlines = 0;
+    const char *p;
+
+    if (!text || max_bytes < 1 || !scratch || scratch_n < 2 || !lines || max_lines < 1)
+        return 0;
+    p = text;
+    while (*p && nlines < max_lines) {
+        int line_bytes = 0;
+        const char *start = p;
+        const char *last_break = p;
+
+        while (*p) {
+            unsigned char c = (unsigned char)*p;
+            int clen = 1;
+            if ((c & 0x80) == 0)
+                clen = 1;
+            else if ((c & 0xE0) == 0xC0)
+                clen = 2;
+            else if ((c & 0xF0) == 0xE0)
+                clen = 3;
+            else if ((c & 0xF8) == 0xF0)
+                clen = 4;
+            if (line_bytes + clen > max_bytes)
+                break;
+            p += clen;
+            line_bytes += clen;
+            last_break = p;
+            if (c == ' ' || c == '\n' || c == '/' || c == '?' || c == '&')
+                last_break = p;
+            if (c == '\n')
+                break;
+        }
+        if (last_break == start) {
+            /* single overlong token: force one codepoint */
+            unsigned char c = (unsigned char)*p;
+            int clen = 1;
+            if ((c & 0xE0) == 0xC0) clen = 2;
+            else if ((c & 0xF0) == 0xE0) clen = 3;
+            else if ((c & 0xF8) == 0xF0) clen = 4;
+            last_break = p + clen;
+            p = last_break;
+            line_bytes = clen;
+        } else if (*p && (unsigned char)*start != '\n') {
+            p = last_break;
+            line_bytes = (int)(p - start);
+        }
+        if (pos + (size_t)line_bytes + 1 >= scratch_n)
+            break;
+        lines[nlines] = scratch + pos;
+        memcpy(scratch + pos, start, (size_t)line_bytes);
+        pos += (size_t)line_bytes;
+        scratch[pos++] = '\0';
+        nlines++;
+        if (*p == '\n')
+            p++;
+    }
+    return nlines;
+}
 
 /* Repaint the title-bar badges in place (white-out previous strip, draw
  * again). *out is the DU rect covering old+new. No refresh. */
@@ -87,34 +169,101 @@ static inline int ui_batt_cells(int pct)
     return 5;
 }
 
-/* Pack enabled providers in dashboard order, always ending with INFO.
- * Returns the number of ids written, capped at max. */
-static inline int ui_cards_from_providers(const ProviderSelection *p, UiCard *ids,
-                                          int max)
+/* Append one provider's card(s). AGY expands to Gemini + third-party. */
+static inline int ui_cards_append_provider(const ProviderSelection *p,
+                                           const char *name, UiCard *ids,
+                                           int n, int max)
 {
-    int n = 0;
-
-    if (!p || !ids || max <= 0)
-        return 0;
-    if (p->grok && n < max)
+    if (!p || !name || !ids || n >= max)
+        return n;
+    if (strcmp(name, "grok") == 0 && p->grok)
         ids[n++] = UI_CARD_GROK;
-    if (p->claude && n < max)
+    else if (strcmp(name, "claude") == 0 && p->claude)
         ids[n++] = UI_CARD_CLAUDE;
-    if (p->codex && n < max)
+    else if (strcmp(name, "codex") == 0 && p->codex)
         ids[n++] = UI_CARD_CODEX;
-    if (p->kimi && n < max)
+    else if (strcmp(name, "kimi") == 0 && p->kimi)
         ids[n++] = UI_CARD_KIMI;
-    if (p->opencode && n < max)
+    else if (strcmp(name, "opencode") == 0 && p->opencode)
         ids[n++] = UI_CARD_OPENCODE;
-    if (p->agy) {
+    else if (strcmp(name, "agy") == 0 && p->agy) {
         if (n < max)
             ids[n++] = UI_CARD_AGY_GEMINI;
         if (n < max)
             ids[n++] = UI_CARD_AGY_THIRD;
     }
+    return n;
+}
+
+/* Pack enabled providers. order_csv (e.g. "kimi,grok,agy") controls order;
+ * NULL/empty uses the default grok..agy sequence. Always ends with INFO.
+ * AGY still emits two cards and is not split. */
+static inline int ui_cards_from_providers_ex(const ProviderSelection *p,
+                                             const char *order_csv, UiCard *ids,
+                                             int max)
+{
+    static const char *def_order[] = {
+        "grok", "claude", "codex", "kimi", "opencode", "agy"
+    };
+    int n = 0;
+    int used[6] = {0, 0, 0, 0, 0, 0};
+    int i;
+
+    if (!p || !ids || max <= 0)
+        return 0;
+
+    if (order_csv && order_csv[0]) {
+        const char *s = order_csv;
+        while (*s && n < max) {
+            char part[16];
+            size_t L = 0;
+            int j;
+
+            while (*s == ' ' || *s == '\t' || *s == ',')
+                s++;
+            if (!*s)
+                break;
+            while (*s && *s != ',' && L + 1 < sizeof(part)) {
+                if (*s != ' ' && *s != '\t')
+                    part[L++] = *s;
+                s++;
+            }
+            part[L] = '\0';
+            while (*s && *s != ',')
+                s++;
+            if (*s == ',')
+                s++;
+            if (!part[0])
+                continue;
+            for (j = 0; j < 6; j++) {
+                if (strcmp(part, def_order[j]) == 0) {
+                    if (!used[j]) {
+                        n = ui_cards_append_provider(p, def_order[j], ids, n, max);
+                        used[j] = 1;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    for (i = 0; i < 6; i++) {
+        if (used[i])
+            continue;
+        n = ui_cards_append_provider(p, def_order[i], ids, n, max);
+        if (n >= max)
+            break;
+    }
     if (n < max)
         ids[n++] = UI_CARD_INFO;
     return n;
+}
+
+/* Pack enabled providers in default dashboard order, always ending with INFO. */
+static inline int ui_cards_from_providers(const ProviderSelection *p, UiCard *ids,
+                                          int max)
+{
+    return ui_cards_from_providers_ex(p, NULL, ids, max);
 }
 
 static inline int ui_rect_contains(const FBInkRect *r, int x, int y)
@@ -164,6 +313,8 @@ struct Ui {
     int card_drawn;
     /* title-bar badge strip from the last paint, for in-place DU redraw */
     FBInkRect badge_rect;
+    /* F02: optional card order CSV (empty = default). */
+    char provider_order[128];
 };
 
 /* Hit-test a painted provider/info card. UI_CARD_NONE if the tap missed.

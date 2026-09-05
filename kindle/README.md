@@ -81,7 +81,7 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 - **设置** —— 打开机内设置页（见下节），接口地址 / WiFi / 自动刷新都在这里改。
 - **关闭** —— 退出应用，脚本自动恢复 framework。应用**不会**自动退出：放着不动就一直常驻，直到点「关闭」或触发自愈层。
 
-接口响应中的 `providers` 是当前采集名单；关闭的工具不会显示卡片，其余卡片会自动重新紧凑排列。需要只查询部分工具时，可在配置文件的地址后加 `?providers=grok,claude`，该筛选只影响本次 Kindle 请求，不改服务端采集名单。
+接口响应中的 `providers` 是当前采集名单；关闭的工具不会显示卡片，其余卡片会自动重新紧凑排列。需要只查询部分工具时，优先用设置页 **Providers**（写入 `show_providers`）；也会在请求 URL 上带 `?providers=`，只影响本次 Kindle 请求，不改服务端采集名单（不会调用 `PUT /api/providers`）。
 
 **常驻与省电**：应用不再有空闲自动退出，挂着就是仪表盘。常驻期间的功耗形态：CPU 阻塞在 `poll` 等触摸（零占用，内核自动进深_idle）；射频只在拉取的几秒钟在线，拉完立即交还——且只有「应用自己开的射频」才会被关掉，进应用前就连着的 WiFi 不受影响；e-ink 靠自身稳态保持画面，不需要供电。自动刷新周期若拉回的数据与屏上完全相同、电量角标也没变，则**跳过重绘**；即使数据有变，定时刷新的重绘也走不闪屏的 GL16（手动刷新、改地址重拉才用全闪的 GC16）——夜间挂机不闪屏。挂机期间设备**不会休眠也不会锁屏**——包装脚本持有 `preventScreenSaver` 并抓取内核 wake lock（`/sys/power/wake_lock`），应用在挂机等待的分段间隙还会每 3–5 分钟续期一次 screensaver 保持，三层都在挡 powerd 的空闲计时。代价是 SoC 待机电流成为常驻底噪，挂机数天请按这个估算电量；**想让设备正常息屏，先点「关闭」**。标题栏右上角状态角标：WiFi 圆点（实心点=已连接，灰点=已断开，拉取后变灰即代表射频已经归还）、已连接时显示当前网络名（SSID，仅限 ASCII 名称，中文名显示为 WiFi）、五格电池条（充电中左侧带「充电」二字；0 格且未充电时整体反显作为低电量告警）。角标只在启动、拉取、设置返回这些既有重绘点采样一次，另外闲置熄灯到期时会顺手再采一次电量——格数或充电态变了才对那一小块发 DU，不整屏闪、不加新定时器。电量先走各机型 sysfs（yoshi / wario / power_supply），读不到再问 `com.lab126.powerd` 的 `battLevel` / `isCharging`——和前光同一条 lipc，PW2 及以后不再因为路径叫 `yoshi_battery` 而整块角标消失。SSID 只在射频已醒着时探测一次。自动刷新跳帧比的是格数而不是原始百分比，所以 87→86 这种一格之内的掉电不会逼出一次看不见的重绘。精确百分比仍在 `--dump-state` 的 `battery_level=` 里。标题栏副标题下还有一行死文字：`自动刷新 5 分钟` / `自动刷新关闭`，常驻时一眼能看出页面会不会自己更新。
 
@@ -94,26 +94,35 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 | 接口地址 | 当前地址的 host 部分 | 弹数字键盘编辑完整 URL |
 | 刷新后关WiFi | 开 / 关 | 直接切换。关掉后拉取完成的 WiFi 保持连接 |
 | 自动刷新 | 关闭 / N 分钟 | 弹键盘输入，0=关闭、1–60 分钟。到点自动开 WiFi 拉一次再关 |
+| Idle light | 关闭 / N 分钟 | 闲置熄灯分钟数；0=关闭该功能 |
+| Display | API / used / remain / large / compact | 循环切换本机显示偏好（large/compact 已存键，布局仍为常规卡片） |
+| Providers | N / 6 | 进入子页：逐个 ON/off，`^`/`v` 调整顺序；至少保留 1 个。请求带 `?providers=`，**不**调用 `PUT /api/providers` |
+| Diagnose | run | 可取消的连接探测；多行展示 WiFi/DNS/connect/HTTP/JSON 阶段；失败不覆盖上次成功额度 |
 | 前光 | 开 / 关 · N | 一行合并：**左半边**点按切换开关——关掉记住档位、再开恢复（与仪表盘闲置熄灯共用记忆档位）；**右侧** `−` / `+` 步进档位，每点一档立刻发给 powerd、DU 局部刷新不闪页。减到 0 即关灯，关着时按 `+` 从记忆档位打开。范围 0–`flMaxIntensity`（常见 24 或 25） |
 
 接口 / WiFi / 自动刷新在点「返回」时写入配置文件并立即生效；改接口地址会顺带重新拉取一次。前光走 `com.lab126.powerd`，立刻改整机前光，**不写**配置文件，退出应用后 Kindle 系统里仍是这个亮度。读不到 powerd 时前光行显示 `--`，点按无效果。自动刷新按**上次拉取完成的时间**排程：设置页 / 键盘 / 卡片放大框打开期间到点的刷新会跳过，回到仪表盘后立即补一次；拉回数据与屏上相同且电池格数、充电态都没变的那次刷新不闪屏。设置页打开期间闲置熄灯计时暂停，返回仪表盘后重新计 3 分钟。从设置页返回时：改了接口地址仍是一次整屏 GC16 并重拉；只调了前光或只改了配置键则用 GL16 轻刷恢复仪表盘，不再整屏闪白。
 
 ## 6. 配置
 
-配置文件是 `/mnt/us/extensions/aiquota/config`，位于 FAT32 分区，插 USB 就能在电脑上直接编辑；应用内的「设置」页改的就是同一份文件，改完即存。六个键：
+配置文件是 `/mnt/us/extensions/aiquota/config`，位于 FAT32 分区，插 USB 就能在电脑上直接编辑；应用内的「设置」页改的就是同一份文件，改完即存。可靠保存会附带 `config.bak`。主要键：
 
 | 键 | 含义 |
 | --- | --- |
-| `api_url` | 数据接口地址。可以写 `host`、`host:port` 或完整 URL；支持 `?providers=grok,claude` 筛选 |
+| `api_url` | 数据接口地址。可以写 `host`、`host:port` 或完整 URL |
 | `touch_swap_xy` | 触摸坐标交换 X/Y 轴（0/1），由 `--calibrate` 确定 |
 | `touch_mirror_x` | 触摸 X 轴镜像（0/1） |
 | `touch_mirror_y` | 触摸 Y 轴镜像（0/1） |
-| `wifi_auto_off` | 拉取完成后是否关掉「由应用自己开启的」WiFi（默认 1）。写 0 则拉完保持连接 |
-| `auto_refresh_min` | 自动刷新间隔（分钟），默认 0=关闭，范围 1–60，超界取 60。应用不再自动退出，这是唯一的定时器 |
+| `wifi_auto_off` | 拉取完成后是否关掉「由应用自己开启的」WiFi（默认 1） |
+| `auto_refresh_min` | 自动刷新间隔（分钟），默认 0=关闭，范围 1–60 |
+| `light_idle_off_min` | 闲置熄灯分钟数；0=关闭；默认 3 |
+| `display_mode_pref` | 0=API，1=used，2=remain，3=large，4=compact |
+| `refresh_preset` | 0=custom，1=manual，2=normal(5 分钟)，3=night(30 分钟)；助手函数可映射，设置页仍以分钟输入为主 |
+| `show_providers` | 本机有序名单，如 `grok,claude,agy`；拉额度时合并为 `?providers=`，不改服务端全局采集名单 |
+| `config_version` | 配置架构版本；启动时旧版本会迁移 |
 
 旧版本配置文件里的 `idle_timeout_s` 行会被当作未知键忽略，下次从设置页保存配置时自动删除。
 
-`api_url` 会做归一化：没有 scheme 就补 `http://`、去掉路径尾部斜杠、路径结尾不是 `/api/usage` 就补上，并原样保留 query。例如写 `123.161.179.32:46927?providers=grok,claude` 等价于 `http://123.161.179.32:46927/api/usage?providers=grok,claude`。机内键盘只适合改 IP 和端口，筛选名单请通过 USB 编辑配置文件。
+`api_url` 会做归一化：没有 scheme 就补 `http://`、去掉路径尾部斜杠、路径结尾不是 `/api/usage` 就补上，并原样保留非 providers 类 query。本机 `show_providers` 在每次请求时覆盖 URL 里旧的 `providers`/`tools` 参数。首次无配置文件时会引导进入设置页。
 
 ## 7. 调试开关
 

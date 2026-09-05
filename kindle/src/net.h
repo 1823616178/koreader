@@ -62,4 +62,8 @@ void net_sanitize_ssid(char *s);
  * lock screen. Off-device lipc does not exist and this is a silent no-op. */
 void net_hold_screensaver(void);
 
+/* Host-test seams for WiFi ownership (R04). */
+int  net_wifi_owned_for_test(void);
+void net_wifi_set_owned_for_test(int owned);
+
 #endif

@@ -5,7 +5,7 @@ CROSS    ?= arm-kindlepw2-linux-gnueabi-
 CC       := $(CROSS)gcc
 CFLAGS   := -std=c99 -Os -ffunction-sections -fdata-sections -Wall -Wextra -D_BSD_SOURCE -D_SVID_SOURCE -Isrc -Ithird_party/cJSON -Ithird_party/fbink
 LDFLAGS  := -Wl,--gc-sections
-LIBS     := third_party/fbink/libfbink.a -lm -lpthread
+LIBS     := third_party/fbink/libfbink.a -lm -lpthread -lrt
 SRCS     := $(wildcard src/*.c) third_party/cJSON/cJSON.c
 BIN      := extension/bin/aiquota
 
@@ -19,9 +19,14 @@ $(BIN): $(SRCS) $(wildcard src/*.h) third_party/cJSON/cJSON.h third_party/fbink/
 test:
 	gcc -std=c99 -Wall -Wextra -Werror -Isrc -Ithird_party/cJSON -Ithird_party/fbink \
 	    -o /tmp/aiquota_test tests/test_main.c src/config.c src/quota.c src/http.c \
-	    src/input.c src/net.c src/light.c src/watchdog.c third_party/cJSON/cJSON.c -lpthread
+	    src/input.c src/net.c src/light.c src/watchdog.c src/mono.c third_party/cJSON/cJSON.c -lpthread -lrt
 	/tmp/aiquota_test
 
 clean:
 	rm -f $(BIN)
-.PHONY: test clean
+# Shell-level launcher/watchdog simulations (session isolation, traps).
+test-scripts:
+	bash tests/wrapper_sim.sh
+	bash tests/watchdog_sim.sh
+
+.PHONY: test test-scripts clean

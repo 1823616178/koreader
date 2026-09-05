@@ -15,6 +15,42 @@
  * On success returns a malloc'd NUL-terminated body and sets *status to the HTTP code.
  * Caller must free().
  * On failure returns NULL and fills errbuf with a short ASCII reason. */
+
+typedef enum {
+    HTTP_PHASE_NONE = 0,
+    HTTP_PHASE_URL,
+    HTTP_PHASE_DNS,
+    HTTP_PHASE_CONNECT,
+    HTTP_PHASE_HTTP,
+    HTTP_PHASE_DONE
+} HttpPhase;
+
+/* Structured timings for the last http_get (F03). Milliseconds; -1 = n/a. */
+typedef struct {
+    HttpPhase last_phase;
+    HttpPhase failed_phase; /* NONE on success */
+    int http_status;
+    long dns_ms;
+    long connect_ms;
+    long http_ms;
+    long total_ms;
+    char err[256];
+} HttpDiag;
+
+void http_diag_reset(void);
+const HttpDiag *http_diag_last(void);
+/* Format a multi-line ASCII report into dst (for INFO / Diagnose popup). */
+void http_diag_format(const HttpDiag *d, int wifi_ok, long wifi_ms,
+                      int json_ok, long json_ms,
+                      char *dst, size_t dst_size);
+
 char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size);
+
+/* Cooperative cancel for a in-flight http_get (R06). The GET checks
+ * between DNS/connect/recv phases and returns NULL with errbuf
+ * "cancelled" when set. Reset before each new request. */
+void http_cancel_reset(void);
+void http_cancel(void);
+int  http_cancel_requested(void);
 
 #endif

@@ -1,6 +1,5 @@
 # AI Quota configuration. Edit over USB, then reopen the app.
-# API endpoint: host, host:port, or full /api/usage URL. Optional per-request
-# filter example: http://host:8787/api/usage?providers=grok,claude
+# API endpoint: host, host:port, or full /api/usage URL.
 api_url=http://123.161.179.32:46927/api/usage
 
 # Touch calibration (0/1). Run `aiquota --calibrate` over SSH to determine.
@@ -12,7 +11,20 @@ touch_mirror_y=0
 wifi_auto_off=1
 
 # Periodic refresh interval in minutes. 0 disables; valid range is 1..60.
-# The app never exits on its own; between ticks it parks with the CPU idle,
-# the radio off and the e-ink static. Cycles that fetch identical data with
-# an unchanged battery badge skip the screen flash entirely.
 auto_refresh_min=0
+
+# F06: idle frontlight off after N minutes; 0 disables.
+light_idle_off_min=3
+
+# F04: 0=follow API displayMode, 1=used, 2=remain, 3=large, 4=compact
+display_mode_pref=0
+
+# F05: 0=custom (use auto_refresh_min), 1=manual, 2=normal(5), 3=night(30)
+refresh_preset=0
+
+# F02: local ordered provider visibility. Request uses ?providers=...
+# Does NOT call PUT /api/providers. Default = all tools.
+show_providers=grok,claude,codex,kimi,opencode,agy
+
+# F07 config schema version
+config_version=2

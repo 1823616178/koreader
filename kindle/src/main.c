@@ -14,6 +14,7 @@
  * (extension/bin/aiquota.sh) restores the framework. */
 #define _POSIX_C_SOURCE 200809L /* sigaction */
 
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,10 +33,18 @@
 #include "settings.h"
 #include "ui.h"
 #include "watchdog.h"
+#include "mono.h"
 
 #define FONT_PATH "/mnt/us/extensions/aiquota/bin/NotoSansSC-subset.ttf"
-#define PING_PATH "/var/tmp/aiquota.ping"
-#define DETAIL_SIZE 600 /* holds a 512-char URL or an error line */
+#define PING_PATH_DEFAULT "/var/tmp/aiquota.ping"
+#define DETAIL_SIZE 900 /* URL / error / F03 diagnose report */
+
+/* Session-scoped heartbeat path from the launcher; falls back for bare runs. */
+static const char *ping_path(void)
+{
+    const char *p = getenv("AIQUOTA_PING_PATH");
+    return (p && p[0]) ? p : PING_PATH_DEFAULT;
+}
 
 /* Dashboard states; the keypad is a sub-mode handled inside the main loop. */
 enum { ST_LOADING = 0, ST_READY, ST_ERROR };
@@ -159,17 +168,88 @@ static void install_signal_handlers(void)
  * next one. First version is fixed -- no config row; if it ever wants a
  * knob, that is a new key, not a reuse of an existing one. */
 #define LIGHT_IDLE_OFF_S (3 * 60)
+/* After the first idle light-off, keep sampling the battery badge on
+ * this low-frequency cadence so auto-refresh=off does not freeze the
+ * cell count overnight (R08). Uses wait_tap_until wake points only. */
+#define BADGE_SAMPLE_S (5 * 60)
+
+static void apply_display_pref(QuotaSnapshot *snap, const AppConfig *cfg)
+{
+    if (!snap || !cfg)
+        return;
+    /* 0=follow API; 1/2 override used/remaining; 3/4 are layout prefs (F04)
+     * that do not reinterpret used percentages. */
+    if (cfg->display_mode_pref == 1)
+        snprintf(snap->display_mode, sizeof(snap->display_mode), "used");
+    else if (cfg->display_mode_pref == 2)
+        snprintf(snap->display_mode, sizeof(snap->display_mode), "remaining");
+}
+
+/* Build the per-request URL with local providers= filter (F02). Never calls
+ * PUT /api/providers. */
+static void build_fetch_url(char *dst, size_t dst_size, const AppConfig *cfg)
+{
+    if (!dst || dst_size == 0 || !cfg)
+        return;
+    (void)config_url_with_providers(dst, dst_size, cfg->api_url,
+                                    cfg->show_providers);
+}
+
+static void apply_provider_order(Ui *ui, const AppConfig *cfg)
+{
+    if (ui && cfg)
+        ui_set_provider_order(ui, cfg->show_providers);
+}
+
+/* F03: last structured connection diagnosis (does not clear have_good). */
+typedef struct {
+    int wifi_ok;
+    long wifi_ms;
+    int json_ok;
+    long json_ms;
+    HttpDiag http;
+    char report[DETAIL_SIZE];
+} ConnDiag;
+
+static ConnDiag g_last_diag;
+
+static void diag_begin(void)
+{
+    memset(&g_last_diag, 0, sizeof(g_last_diag));
+    http_diag_reset();
+}
+
+static void diag_finish(int wifi_ok, long wifi_ms, int json_ok, long json_ms)
+{
+    const HttpDiag *h = http_diag_last();
+
+    g_last_diag.wifi_ok = wifi_ok;
+    g_last_diag.wifi_ms = wifi_ms;
+    g_last_diag.json_ok = json_ok;
+    g_last_diag.json_ms = json_ms;
+    if (h)
+        g_last_diag.http = *h;
+    http_diag_format(&g_last_diag.http, wifi_ok, wifi_ms, json_ok, json_ms,
+                     g_last_diag.report, sizeof(g_last_diag.report));
+}
+
+
+static int light_idle_secs(const AppConfig *cfg)
+{
+    int m = cfg ? cfg->light_idle_off_min : CONFIG_LIGHT_IDLE_DEFAULT;
+    if (m <= 0)
+        return 0; /* feature off */
+    return m * 60;
+}
 
 /* One tap wait, wrapped in the heartbeat contract (see watchdog.h): each
  * segment announces its own bound before blocking, then the short local-work
  * bound takes over. With this, the app has no unbounded wait left anywhere,
  * which is what lets watchdog.sh read a missing beat as "wedged" rather than
  * "the user put the Kindle down".
- * deadline is an absolute wall-clock second (0 = none). The call returns 1
- * when it passes -- the auto-refresh tick -- and keeps waiting through mere
- * segment expiries otherwise, so the app parks on one blocked poll at a time
- * and costs no CPU while it sits there. Returns 0 tap / 1 tick / -1 error,
- * like input_wait_tap. */
+ * deadline is an absolute monotonic second from mono_now_s() (0 = none).
+ * Wall-clock jumps no longer stretch or skip idle/auto-refresh waits (R09).
+ * Returns 0 tap / 1 tick / -1 error, like input_wait_tap. */
 static int wait_tap_until(int fd, int scr_w, int scr_h, const AppConfig *cfg,
                           long deadline, int *x, int *y)
 {
@@ -178,7 +258,7 @@ static int wait_tap_until(int fd, int scr_w, int scr_h, const AppConfig *cfg,
         int rc;
 
         if (deadline > 0) {
-            long left = deadline - (long)time(NULL);
+            long left = deadline - mono_now_s();
 
             if (left <= 0)
                 return 1;
@@ -313,22 +393,13 @@ static void paint_current_dashboard(int fbfd, Ui *ui, const QuotaSnapshot *snap,
     full_refresh_mode(fbfd, wfm_mode);
 }
 
-#define FNV_BASIS 0xcbf29ce484222325ULL
-
-static unsigned long long fnv_add(unsigned long long h, const char *s)
+/* Display-content signature (R03): hash what the panel actually shows, not
+ * the raw JSON. generatedAt-only churn within the same minute no longer
+ * forces a full refresh. */
+static unsigned long long frame_sig_of(const QuotaSnapshot *snap,
+                                      const char *status, const char *detail)
 {
-    if (s) {
-        while (*s) {
-            h ^= (unsigned char)*s++;
-            h *= 0x100000001b3ULL;
-        }
-    }
-    return h;
-}
-
-static unsigned long long frame_sig_of(const char *status, const char *src)
-{
-    return fnv_add(fnv_add(FNV_BASIS, status), src);
+    return quota_display_sig(snap, status, detail);
 }
 
 /* LOADING paint: empty skeleton + "connecting" card, like quotapage.lua's
@@ -363,6 +434,25 @@ static void paint_loading(int fbfd, Ui *ui, const char *host, const char *api_ur
  * this content (same signature, same battery badge and a dashboard rather
  * than a skeleton is up): an auto-refresh cycle that changed nothing then
  * costs the radio wake-up and nothing else -- no e-ink flash. */
+/* Background GET so the UI thread can still accept 关闭 during a slow
+ * request (R06). The worker only runs http_get; WiFi/parse stay on main. */
+typedef struct {
+    const char *url;
+    char *body;
+    int status;
+    char err[256];
+    volatile int done;
+} FetchJob;
+
+static void *fetch_job_main(void *arg)
+{
+    FetchJob *job = (FetchJob *)arg;
+
+    job->body = http_get(job->url, &job->status, job->err, sizeof(job->err));
+    job->done = 1;
+    return NULL;
+}
+
 static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
                     QuotaSnapshot *snap, int *have_good, int demo,
                     int auto_refresh_min, int auto_cycle,
@@ -380,7 +470,7 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
             *have_good = 1;
         }
         snprintf(detail, detail_size, "demo");
-        sig = frame_sig_of("已连接", DEMO_JSON);
+        sig = frame_sig_of(&fresh, "已连接", detail);
     } else {
         int status = 0;
         char errbuf[256];
@@ -391,26 +481,27 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
             /* Checked every cycle: WiFi may drop while the app is open. */
             st = ST_ERROR;
             snprintf(detail, detail_size, "WiFi 未连接");
-            sig = frame_sig_of("失败", detail);
+            sig = frame_sig_of(snap, "失败", detail);
         } else {
             body = http_get(api_url, &status, errbuf, sizeof(errbuf));
             if (!body) {
                 st = ST_ERROR;
                 snprintf(detail, detail_size, "%s", errbuf);
-                sig = frame_sig_of("失败", detail);
+                sig = frame_sig_of(snap, "失败", detail);
             } else if (status != 200) {
                 st = ST_ERROR;
                 snprintf(detail, detail_size, "HTTP %d", status);
-                sig = frame_sig_of("失败", detail);
+                sig = frame_sig_of(snap, "失败", detail);
             } else if (quota_parse_snapshot(body, &fresh) != 0) {
                 st = ST_ERROR;
                 snprintf(detail, detail_size, "响应不是有效 JSON");
-                sig = frame_sig_of("失败", detail);
+                sig = frame_sig_of(snap, "失败", detail);
             } else {
                 *snap = fresh;
+                /* display_mode_pref applied by caller when cfg is known */
                 *have_good = 1;
                 snprintf(detail, detail_size, "%s", api_url);
-                sig = frame_sig_of("已连接", body);
+                sig = frame_sig_of(&fresh, "已连接", detail);
             }
             free(body); /* free(NULL) is fine */
         }
@@ -674,13 +765,16 @@ static int run_card_popup(int fbfd, int input_fd, int scr_w, int scr_h,
     FBInkRect prect;
     int have_dump = 0;
     int wr, x = 0, y = 0;
+    int page = 0;
+    int pages;
+    const char *status = st == ST_ERROR ? "失败" : "已连接";
 
     memset(&dump, 0, sizeof(dump));
-    ui_popup_rect(ui, &prect);
+    pages = (card == UI_CARD_INFO) ? ui_popup_info_pages(ui, detail) : 1;
+    ui_popup_rect_for(ui, card, &prect);
     if (fbink_rect_dump(fbfd, &prect, &dump) == 0)
         have_dump = 1;
-    ui_popup_draw(ui, snap, st == ST_ERROR ? "失败" : "已连接", detail,
-                  card, &prect);
+    ui_popup_draw_ex(ui, snap, status, detail, card, page, &prect);
     ui_refresh(fbfd, &prect, WFM_GC16);
 
     for (;;) {
@@ -694,12 +788,30 @@ static int run_card_popup(int fbfd, int input_fd, int scr_w, int scr_h,
                 *idle_deadline = 0;
                 maybe_refresh_badges(fbfd, ui);
             }
-            continue; /* auto-refresh is deferred until the popup closes */
+            continue;
         }
         if (wr < 0)
             return -1;
         light_idle_restore();
-        *idle_deadline = (long)time(NULL) + LIGHT_IDLE_OFF_S;
+        {
+            int lis = light_idle_secs(cfg);
+            *idle_deadline = lis > 0 ? mono_now_s() + lis : 0;
+        }
+        {
+            int hit = ui_popup_hit(ui, &prect, card, pages, x, y);
+            if (hit == 1 && page > 0) {
+                page--;
+                ui_popup_draw_ex(ui, snap, status, detail, card, page, &prect);
+                ui_refresh(fbfd, &prect, WFM_GC16);
+                continue;
+            }
+            if (hit == 2 && page + 1 < pages) {
+                page++;
+                ui_popup_draw_ex(ui, snap, status, detail, card, page, &prect);
+                ui_refresh(fbfd, &prect, WFM_GC16);
+                continue;
+            }
+        }
         break;
     }
 
@@ -721,6 +833,7 @@ static int run_card_popup(int fbfd, int input_fd, int scr_w, int scr_h,
     return 0;
 }
 
+
 int main(int argc, char **argv)
 {
     AppConfig cfg;
@@ -731,8 +844,17 @@ int main(int argc, char **argv)
     Ui *ui = NULL;
     const char *host;
     char detail[DETAIL_SIZE];
-    time_t last_fetch;      /* when the current dashboard data was fetched */
+    long last_fetch;        /* mono second when current data was fetched (R09) */
+    char snap_api_url[768]; /* R10: snapshot bound to fetch URL (+providers) */
+    char fetch_url[768]; /* F02: api_url + local providers query */
+    int first_run_setup = 0; /* F07: open settings when no config */
+    int open_settings_once = 0;
+    int providers_changed = 0;
+    unsigned req_gen;       /* R10: increments per fetch; drop stale results */
+    int fail_streak;        /* F05: consecutive fetch failures */
+    long fail_backoff_until;/* mono second until auto-refresh may retry */
     long idle_deadline;     /* wall-clock second the frontlight dims at */
+    long badge_deadline;    /* next low-freq battery badge sample (R08) */
     int have_good = 0;
     int have_cfg_file;
     int mode = MODE_NORMAL;
@@ -764,7 +886,12 @@ int main(int argc, char **argv)
      * The config file wins when present; otherwise FBInk's device quirks are
      * better touch defaults than zeros (adopted after fbink_get_state). */
     config_defaults(&cfg);
-    have_cfg_file = (config_load(&cfg, CONFIG_PATH) == 0);
+    have_cfg_file = (config_load_with_backup(&cfg, CONFIG_PATH) == 0);
+    if (config_migrate(&cfg)) {
+        /* Persist migrated keys (show_providers, version) when possible. */
+        if (have_cfg_file)
+            (void)config_save(&cfg, CONFIG_PATH);
+    }
 
     install_signal_handlers();
 
@@ -787,6 +914,8 @@ int main(int argc, char **argv)
         cfg.touch_swap_xy = fbstate.touch_swap_axes ? 1 : 0;
         cfg.touch_mirror_x = fbstate.touch_mirror_x ? 1 : 0;
         cfg.touch_mirror_y = fbstate.touch_mirror_y ? 1 : 0;
+        first_run_setup = 1; /* F07: guide into settings */
+        open_settings_once = 1;
     }
     scr_w = (int)fbstate.screen_width;
     scr_h = (int)fbstate.screen_height;
@@ -805,6 +934,8 @@ int main(int argc, char **argv)
         fbink_close(fbfd);
         return 1;
     }
+    apply_provider_order(ui, &cfg);
+    build_fetch_url(fetch_url, sizeof(fetch_url), &cfg);
     input_fd = input_open(); /* first: input_wait_tap uses its statics */
     if (input_fd < 0 && mode != MODE_DEMO && mode != MODE_CALIBRATE) {
         /* No interaction is possible without the touch device: fatal. */
@@ -814,7 +945,7 @@ int main(int argc, char **argv)
     }
 
     /* Every interactive mode; extension/bin/watchdog.sh reads the file. */
-    wd_start(PING_PATH);
+    wd_start(ping_path());
     wd_expect(WD_STEP_S);
 
     if (mode == MODE_CALIBRATE) {
@@ -825,8 +956,34 @@ int main(int argc, char **argv)
     host = api_host(cfg.api_url);
     quota_empty_snapshot(&snap);
     detail[0] = '\0';
-    last_fetch = time(NULL);
-    idle_deadline = (long)time(NULL) + LIGHT_IDLE_OFF_S;
+    last_fetch = mono_now_s();
+    snap_api_url[0] = '\0';
+    req_gen = 0;
+    fail_streak = 0;
+    fail_backoff_until = 0;
+    {
+        int lis = light_idle_secs(&cfg);
+        idle_deadline = lis > 0 ? mono_now_s() + lis : 0;
+    }
+    badge_deadline = 0; /* armed after the first idle light-off */
+
+    /* F01: show last good snapshot for this URL while the first fetch runs. */
+    if (mode != MODE_DEMO && mode != MODE_CALIBRATE) {
+        char cached[8192];
+        long long saved_at = 0;
+
+        if (config_cache_load(CONFIG_CACHE_PATH, fetch_url, cached,
+                              sizeof(cached), &saved_at) == 0) {
+            QuotaSnapshot fresh;
+            if (quota_parse_snapshot(cached, &fresh) == 0) {
+                snap = fresh;
+                apply_display_pref(&snap, &cfg);
+                have_good = 1;
+                snprintf(snap_api_url, sizeof(snap_api_url), "%s", fetch_url);
+                snprintf(detail, sizeof(detail), "缓存");
+            }
+        }
+    }
 
     if (mode == MODE_DEMO) {
         /* Render the embedded sample, once, even without a touch device. */
@@ -847,7 +1004,7 @@ int main(int argc, char **argv)
                               net_wifi_state(), ssid, batt, chg,
                               cfg.auto_refresh_min);
             frame_is_dashboard = 1;
-            frame_sig = frame_sig_of("已连接", DEMO_JSON);
+            frame_sig = frame_sig_of(&snap, "已连接", detail);
             remember_batt(batt, chg);
         }
         full_refresh(fbfd);
@@ -856,6 +1013,13 @@ int main(int argc, char **argv)
             goto out;
         }
         st = ST_READY; /* the event loop re-renders demo data on REFRESH */
+    }
+
+    /* F07 first-run: no config file -> open settings before the first fetch so
+     * the user can set api_url. Diagnose / providers live there too. */
+    if (first_run_setup && mode == MODE_NORMAL) {
+        snprintf(detail, sizeof(detail), "首次运行：请配置接口地址");
+        st = ST_READY; /* skip auto fetch until settings return */
     }
 
     /* --- event loop ------------------------------------------------------- */
@@ -870,15 +1034,160 @@ int main(int argc, char **argv)
         UiAction action;
 
         if (st == ST_LOADING) {
+            int want_close = 0;
+
             wd_expect(WD_STEP_S); /* net.c and http.c re-arm per blocking phase */
             if (!auto_cycle)
                 paint_loading(fbfd, ui, host, cfg.api_url,
                               cfg.auto_refresh_min);
-            st = do_fetch(fbfd, ui, cfg.api_url, host, &snap, &have_good,
-                          mode == MODE_DEMO, cfg.auto_refresh_min, auto_cycle,
-                          detail, sizeof(detail), cfg.wifi_auto_off);
-            last_fetch = time(NULL); /* auto-refresh counts from this data */
+            req_gen++;
+            /* R10: if the bound URL no longer matches, drop the old snapshot
+             * so a failed fetch cannot look like the new endpoint's data. */
+            build_fetch_url(fetch_url, sizeof(fetch_url), &cfg);
+            apply_provider_order(ui, &cfg);
+            if (have_good && snap_api_url[0] &&
+                strcmp(snap_api_url, fetch_url) != 0) {
+                quota_empty_snapshot(&snap);
+                have_good = 0;
+                snap_api_url[0] = '\0';
+            }
+            if (mode == MODE_DEMO) {
+                st = do_fetch(fbfd, ui, cfg.api_url, host, &snap, &have_good,
+                              1, cfg.auto_refresh_min, auto_cycle,
+                              detail, sizeof(detail), 0);
+                snprintf(snap_api_url, sizeof(snap_api_url), "%s", cfg.api_url);
+            } else {
+                /* Cancelable path (R06): WiFi on main, GET in a worker so
+                 * 关闭 still hit-tests during a slow DNS/connect/recv. */
+                FetchJob job;
+                pthread_t tid;
+                unsigned gen = req_gen;
+
+                memset(&job, 0, sizeof(job));
+                job.url = fetch_url;
+                http_cancel_reset();
+                diag_begin();
+                {
+                    long tw0 = mono_now_ms();
+                    int wrc = net_ensure_wifi();
+                    long wifi_ms = mono_now_ms() - tw0;
+
+                if (wrc != 0) {
+                    diag_finish(0, wifi_ms, 0, 0);
+                    st = ST_ERROR;
+                    snprintf(detail, sizeof(detail), "WiFi 未连接");
+                    paint_current_dashboard(fbfd, ui, &snap, host, st, detail,
+                                            cfg.auto_refresh_min, WFM_GC16);
+                } else if (pthread_create(&tid, NULL, fetch_job_main, &job) != 0) {
+                    /* Fallback: synchronous GET if threads are unavailable. */
+                    st = do_fetch(fbfd, ui, fetch_url, host, &snap, &have_good,
+                                  0, cfg.auto_refresh_min, auto_cycle,
+                                  detail, sizeof(detail), cfg.wifi_auto_off);
+                    diag_finish(1, wifi_ms, have_good, 0);
+                    if (have_good) {
+                        apply_display_pref(&snap, &cfg);
+                        snprintf(snap_api_url, sizeof(snap_api_url), "%s",
+                                 fetch_url);
+                    }
+                } else {
+                    while (!job.done) {
+                        int fx = 0, fy = 0;
+                        int fr = wait_tap_until(input_fd, scr_w, scr_h, &cfg,
+                                                mono_now_s() + 1, &fx, &fy);
+                        if (fr == 0 &&
+                            ui_hit_button(ui, fx, fy) == UI_ACTION_CLOSE) {
+                            http_cancel();
+                            want_close = 1;
+                            ui_flash_button(ui, fbfd, UI_ACTION_CLOSE);
+                        }
+                    }
+                    pthread_join(tid, NULL);
+                    if (gen != req_gen) {
+                        free(job.body);
+                        job.body = NULL;
+                    } else if (want_close) {
+                        free(job.body);
+                        if (cfg.wifi_auto_off)
+                            net_release_wifi();
+                        break; /* leave the event loop */
+                    } else if (!job.body) {
+                        st = ST_ERROR;
+                        if (++fail_streak > 6)
+                            fail_streak = 6;
+                        fail_backoff_until = mono_now_s() +
+                            (30L << (fail_streak > 5 ? 5 : fail_streak));
+                        snprintf(detail, sizeof(detail), "%s",
+                                 job.err[0] ? job.err : "请求失败");
+                        if (cfg.wifi_auto_off)
+                            net_release_wifi();
+                        paint_current_dashboard(fbfd, ui, &snap, host, st,
+                                                detail, cfg.auto_refresh_min,
+                                                auto_cycle ? WFM_GL16 : WFM_GC16);
+                    } else if (job.status != 200) {
+                        st = ST_ERROR;
+                        snprintf(detail, sizeof(detail), "HTTP %d", job.status);
+                        free(job.body);
+                        if (cfg.wifi_auto_off)
+                            net_release_wifi();
+                        paint_current_dashboard(fbfd, ui, &snap, host, st,
+                                                detail, cfg.auto_refresh_min,
+                                                auto_cycle ? WFM_GL16 : WFM_GC16);
+                    } else {
+                        QuotaSnapshot fresh;
+                        if (quota_parse_snapshot(job.body, &fresh) != 0) {
+                            st = ST_ERROR;
+                            snprintf(detail, sizeof(detail),
+                                     "响应不是有效 JSON");
+                        } else {
+                            snap = fresh;
+                            apply_display_pref(&snap, &cfg);
+                            have_good = 1;
+                            st = ST_READY;
+                            fail_streak = 0;
+                            fail_backoff_until = 0;
+                            snprintf(detail, sizeof(detail), "%s", fetch_url);
+                            snprintf(snap_api_url, sizeof(snap_api_url), "%s",
+                                     fetch_url);
+                            (void)config_cache_save(CONFIG_CACHE_PATH, fetch_url,
+                                                    job.body,
+                                                    (long long)time(NULL) * 1000LL);
+                        }
+                        free(job.body);
+                        if (cfg.wifi_auto_off)
+                            net_release_wifi();
+                        {
+                            unsigned long long sig =
+                                frame_sig_of(&snap,
+                                             st == ST_ERROR ? "失败" : "已连接",
+                                             detail);
+                            char ssid[33];
+                            int batt, chg;
+                            net_battery(&batt, &chg);
+                            net_wifi_ssid(ssid, sizeof(ssid));
+                            if (!(frame_is_dashboard && sig == frame_sig &&
+                                  ui_batt_cells(batt) == frame_batt &&
+                                  batt_chg_flag(chg) == frame_chg)) {
+                                ui_draw_dashboard(ui, &snap, host,
+                                    st == ST_ERROR ? "失败" : "已连接", detail,
+                                    0, net_wifi_state(), ssid, batt, chg,
+                                    cfg.auto_refresh_min);
+                                frame_is_dashboard = 1;
+                                frame_sig = sig;
+                                remember_batt(batt, chg);
+                                full_refresh_mode(fbfd,
+                                    auto_cycle ? WFM_GL16 : WFM_GC16);
+                            }
+                        }
+                    }
+                    /* record structured diag for this attempt (F03) */
+                    diag_finish(1, wifi_ms, have_good && st == ST_READY, 0);
+                }
+                } /* wifi_ms scope */
+            }
+            last_fetch = mono_now_s();
             auto_cycle = 0;
+            if (want_close)
+                break;
         }
 
         /* READY/ERROR: park on one blocked poll until the next tap or the
@@ -887,15 +1196,27 @@ int main(int argc, char **argv)
          * buffer while a fetch runs stay hit-testable against the NEW
          * screen. An overdue deadline (e.g. time spent in settings) returns
          * 1 immediately and fetches right away. */
+        if (open_settings_once) {
+            open_settings_once = 0;
+            action = UI_ACTION_SETTINGS;
+            /* Paint a hint once so the empty dashboard is not silent. */
+            paint_current_dashboard(fbfd, ui, &snap, host, st, detail,
+                                    cfg.auto_refresh_min, WFM_GC16);
+            goto handle_action;
+        }
         auto_deadline = cfg.auto_refresh_min > 0
                             ? (long)last_fetch + (long)cfg.auto_refresh_min * 60
                             : 0;
+        if (auto_deadline > 0 && fail_backoff_until > auto_deadline)
+            auto_deadline = fail_backoff_until;
         deadline = auto_deadline;
         if (idle_deadline > 0 && (deadline == 0 || idle_deadline < deadline))
             deadline = idle_deadline;
+        if (badge_deadline > 0 && (deadline == 0 || badge_deadline < deadline))
+            deadline = badge_deadline;
         wr = wait_tap_until(input_fd, scr_w, scr_h, &cfg, deadline, &x, &y);
         if (wr > 0) {
-            long now = (long)time(NULL);
+            long now = mono_now_s();
 
             /* The expiry may have been the light, the refresh, or both:
              * test each against its own deadline instead of assuming the
@@ -905,6 +1226,12 @@ int main(int argc, char **argv)
                 light_idle_off(); /* remembers the level for the next touch */
                 idle_deadline = 0;
                 maybe_refresh_badges(fbfd, ui);
+                /* Keep sampling while parked with auto-refresh off (R08). */
+                badge_deadline = now + BADGE_SAMPLE_S;
+            }
+            if (badge_deadline > 0 && now >= badge_deadline) {
+                maybe_refresh_badges(fbfd, ui);
+                badge_deadline = now + BADGE_SAMPLE_S;
             }
             if (auto_deadline > 0 && now >= auto_deadline) {
                 auto_cycle = 1;
@@ -921,7 +1248,11 @@ int main(int argc, char **argv)
          * still lands on whatever the user aimed at (the first tap acts, it
          * does not just wake). No-op when the light was not dimmed by us. */
         light_idle_restore();
-        idle_deadline = (long)time(NULL) + LIGHT_IDLE_OFF_S;
+        {
+        int lis = light_idle_secs(&cfg);
+        idle_deadline = lis > 0 ? mono_now_s() + lis : 0;
+    }
+        badge_deadline = 0; /* active use: resume via the next idle-off hitch */
         action = ui_hit_button(ui, x, y);
         if (action == UI_ACTION_NONE) {
             UiCard card = ui_hit_card(ui, x, y);
@@ -939,6 +1270,7 @@ int main(int argc, char **argv)
         }
         ui_flash_button(ui, fbfd, action);
 
+handle_action:
         if (action == UI_ACTION_CLOSE)
             break;
         if (action == UI_ACTION_REFRESH) {
@@ -979,10 +1311,160 @@ int main(int argc, char **argv)
                 if (hit == SET_HIT_NONE)
                     continue; /* toggle flipped / stray tap: page already updated */
 
+                if (hit == SET_HIT_EDIT_PROVIDERS) {
+                    int pdone = 0;
+                    settings_providers_draw(sp);
+                    full_refresh(fbfd);
+                    while (!pdone) {
+                        wr = wait_tap_until(input_fd, scr_w, scr_h, &cfg,
+                                            0, &x, &y);
+                        if (wr != 0) {
+                            fprintf(stderr, "aiquota: touch input device lost\n");
+                            settings_destroy(sp);
+                            rc = 1;
+                            goto out;
+                        }
+                        pdone = settings_providers_handle_tap(sp, fbfd, x, y);
+                    }
+                    settings_draw(sp);
+                    full_refresh(fbfd);
+                    continue;
+                }
+
+                if (hit == SET_HIT_DIAGNOSE) {
+                    /* F03: cancelable probe; never clears have_good snapshot. */
+                    char durl[768];
+                    FetchJob djob;
+                    pthread_t dtid;
+                    int dclose = 0;
+                    char dmsg[DETAIL_SIZE];
+
+                    /* Diagnose against the settings working copy (not saved yet). */
+                    {
+                        AppConfig tmp = cfg;
+                        snprintf(tmp.api_url, sizeof(tmp.api_url), "%s",
+                                 settings_url(sp));
+                        snprintf(tmp.show_providers, sizeof(tmp.show_providers),
+                                 "%s", settings_providers(sp));
+                        build_fetch_url(durl, sizeof(durl), &tmp);
+                    }
+                    memset(&djob, 0, sizeof(djob));
+                    djob.url = durl;
+                    http_cancel_reset();
+                    diag_begin();
+                    snprintf(dmsg, sizeof(dmsg), "Diagnosing...");
+                    settings_draw(sp);
+                    ui_text(ui, dmsg, ui->px_subtitle, 0, ui->h / 2, ui->w,
+                            ui->line_h, UI_ALIGN_CENTER, FG_BLACK, 0);
+                    full_refresh(fbfd);
+                    {
+                        long tw0 = mono_now_ms();
+                        int wrc = net_ensure_wifi();
+                        long wifi_ms = mono_now_ms() - tw0;
+                        if (wrc != 0) {
+                            diag_finish(0, wifi_ms, 0, 0);
+                        } else if (pthread_create(&dtid, NULL, fetch_job_main,
+                                                  &djob) != 0) {
+                            int stcode = 0;
+                            char err[256];
+                            char *body = http_get(durl, &stcode, err, sizeof(err));
+                            int jok = 0;
+                            if (body) {
+                                QuotaSnapshot tmp;
+                                jok = (quota_parse_snapshot(body, &tmp) == 0);
+                                free(body);
+                            }
+                            diag_finish(1, wifi_ms, jok, 0);
+                            if (cfg.wifi_auto_off)
+                                net_release_wifi();
+                        } else {
+                            while (!djob.done) {
+                                int fx = 0, fy = 0;
+                                int fr = wait_tap_until(input_fd, scr_w, scr_h,
+                                                        &cfg, mono_now_s() + 1,
+                                                        &fx, &fy);
+                                if (fr == 0 &&
+                                    ui_hit_button(ui, fx, fy) == UI_ACTION_CLOSE) {
+                                    http_cancel();
+                                    dclose = 1;
+                                }
+                            }
+                            pthread_join(dtid, NULL);
+                            if (dclose) {
+                                free(djob.body);
+                                if (cfg.wifi_auto_off)
+                                    net_release_wifi();
+                                settings_draw(sp);
+                                full_refresh(fbfd);
+                                continue;
+                            }
+                            {
+                                int jok = 0;
+                                long j0 = mono_now_ms();
+                                if (djob.body && djob.status == 200) {
+                                    QuotaSnapshot tmp;
+                                    jok = (quota_parse_snapshot(djob.body,
+                                                                &tmp) == 0);
+                                }
+                                diag_finish(1, wifi_ms, jok, mono_now_ms() - j0);
+                            }
+                            free(djob.body);
+                            if (cfg.wifi_auto_off)
+                                net_release_wifi();
+                        }
+                    }
+                    /* Show report in multi-line info popup; keep snap intact. */
+                    {
+                        int page = 0;
+                        int pages;
+                        FBInkRect prect;
+                        snprintf(detail, sizeof(detail), "%s",
+                                 g_last_diag.report[0] ? g_last_diag.report
+                                                       : "no diag");
+                        pages = ui_popup_info_pages(ui, detail);
+                        if (pages < 1)
+                            pages = 1;
+                        ui_popup_draw_ex(ui, &snap, "诊断", detail, UI_CARD_INFO,
+                                         page, &prect);
+                        full_refresh(fbfd);
+                        for (;;) {
+                            wr = wait_tap_until(input_fd, scr_w, scr_h, &cfg,
+                                                0, &x, &y);
+                            if (wr != 0)
+                                break;
+                            {
+                                int ph = ui_popup_hit(ui, &prect, UI_CARD_INFO,
+                                                      pages, x, y);
+                                if (ph == 1 && page > 0) {
+                                    page--;
+                                    ui_popup_draw_ex(ui, &snap, "诊断", detail,
+                                                     UI_CARD_INFO, page, &prect);
+                                    full_refresh(fbfd);
+                                } else if (ph == 2 && page + 1 < pages) {
+                                    page++;
+                                    ui_popup_draw_ex(ui, &snap, "诊断", detail,
+                                                     UI_CARD_INFO, page, &prect);
+                                    full_refresh(fbfd);
+                                } else if (ph == 0) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    settings_draw(sp);
+                    full_refresh(fbfd);
+                    continue;
+                }
+
                 /* --- keypad editor over one field ------------------------ */
                 {
                     char edit[sizeof(cfg.api_url)];
                     int kr = 0;
+
+                    if (hit != SET_HIT_EDIT_URL && hit != SET_HIT_EDIT_REFRESH &&
+                        hit != SET_HIT_EDIT_IDLE) {
+                        continue;
+                    }
 
                     if (!kp)
                         kp = keypad_create(ui);
@@ -1001,6 +1483,11 @@ int main(int argc, char **argv)
                                  settings_refresh_min(sp));
                         keypad_set_digits_only(kp, 1); /* pure-number field */
                         keypad_draw(kp, "自动刷新(分钟)", edit);
+                    } else if (hit == SET_HIT_EDIT_IDLE) {
+                        snprintf(edit, sizeof(edit), "%d",
+                                 settings_idle_min(sp));
+                        keypad_set_digits_only(kp, 1);
+                        keypad_draw(kp, "Idle light (min)", edit);
                     }
                     full_refresh(fbfd);
 
@@ -1040,6 +1527,14 @@ int main(int argc, char **argv)
                             if (minutes > CONFIG_AUTO_REFRESH_MAX)
                                 minutes = CONFIG_AUTO_REFRESH_MAX;
                             settings_set_refresh_min(sp, (int)minutes);
+                        } else if (hit == SET_HIT_EDIT_IDLE) {
+                            long minutes = strtol(edit, NULL, 10);
+
+                            if (minutes < 0)
+                                minutes = 0;
+                            if (minutes > CONFIG_LIGHT_IDLE_MAX)
+                                minutes = CONFIG_LIGHT_IDLE_MAX;
+                            settings_set_light_idle_min(sp, (int)minutes);
                         }
                     }
                     /* Confirm and cancel both land back on the page, redrawn
@@ -1049,14 +1544,49 @@ int main(int argc, char **argv)
                 }
             }
 
-            changed = settings_commit(sp, &cfg);
-            settings_destroy(sp);
+            {
+                char prev_prov[128];
+                snprintf(prev_prov, sizeof(prev_prov), "%s", cfg.show_providers);
+                changed = settings_commit(sp, &cfg);
+                providers_changed =
+                    strcmp(prev_prov, cfg.show_providers) != 0;
+            }
             if (url_changed)
                 host = api_host(cfg.api_url);
-            if (changed && config_save(&cfg, CONFIG_PATH) != 0)
-                fprintf(stderr, "aiquota: cannot write %s\n", CONFIG_PATH);
-            if (url_changed) {
-                /* New endpoint: keep the confirm-address-refetches semantic. */
+            apply_provider_order(ui, &cfg);
+            build_fetch_url(fetch_url, sizeof(fetch_url), &cfg);
+
+            /* Persist before leaving the page. Memory cfg is already updated;
+             * a failed write must be visible and retriable, never reported as
+             * success. Any tap retries; BACK is not required again. */
+            if (changed) {
+                while (config_save(&cfg, CONFIG_PATH) != 0) {
+                    fprintf(stderr, "aiquota: cannot write %s\n", CONFIG_PATH);
+                    settings_draw(sp);
+                    ui_text(ui, "保存失败，点击重试", ui->px_subtitle,
+                            0, ui->h / 2, ui->w, ui->line_h,
+                            UI_ALIGN_CENTER, FG_BLACK, 0);
+                    full_refresh(fbfd);
+                    wr = wait_tap_until(input_fd, scr_w, scr_h, &cfg,
+                                        0, &x, &y);
+                    if (wr != 0) {
+                        fprintf(stderr,
+                                "aiquota: touch input device lost\n");
+                        settings_destroy(sp);
+                        rc = 1;
+                        goto out;
+                    }
+                }
+            }
+            settings_destroy(sp);
+            if (url_changed || providers_changed || first_run_setup) {
+                /* New endpoint / filter / first-run leave settings: refetch. */
+                if (url_changed || providers_changed) {
+                    quota_empty_snapshot(&snap);
+                    have_good = 0;
+                    snap_api_url[0] = '\0';
+                }
+                first_run_setup = 0;
                 st = ST_LOADING;
             } else {
                 /* Same snapshot as before settings: keep its signature,
@@ -1066,7 +1596,10 @@ int main(int argc, char **argv)
                                         cfg.auto_refresh_min, WFM_GL16);
             }
             /* Time spent editing does not count as dashboard idle. */
-            idle_deadline = (long)time(NULL) + LIGHT_IDLE_OFF_S;
+            {
+        int lis = light_idle_secs(&cfg);
+        idle_deadline = lis > 0 ? mono_now_s() + lis : 0;
+    }
         }
     }
 

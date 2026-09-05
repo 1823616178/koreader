@@ -19,7 +19,10 @@ typedef enum {
     SET_HIT_NONE = 0,   /* consumed here (toggle flip / stepper / stray tap) */
     SET_HIT_BACK,       /* leave the page: caller commits + saves */
     SET_HIT_EDIT_URL,   /* open the shared Keypad on this field */
-    SET_HIT_EDIT_REFRESH
+    SET_HIT_EDIT_REFRESH,
+    SET_HIT_EDIT_IDLE,  /* F06 light_idle_off_min */
+    SET_HIT_EDIT_PROVIDERS, /* F02: open providers sub-page */
+    SET_HIT_DIAGNOSE    /* F03: run connection diagnosis */
 } SettingsHit;
 
 /* Takes an internal snapshot of cfg as both the working copy and the
@@ -46,6 +49,14 @@ int         settings_refresh_min(const Settings *s);
  * caller redraws the whole page once the editor closes. */
 int settings_set_url(Settings *s, const char *normalized_url);
 int settings_set_refresh_min(Settings *s, int minutes);
+int settings_set_light_idle_min(Settings *s, int minutes);
+int settings_idle_min(const Settings *s);
+const char *settings_providers(const Settings *s);
+
+/* F02 providers sub-page: draw / tap until BACK. Mutates working copy only. */
+void settings_providers_draw(Settings *s);
+/* Returns 1 when the user taps Back (leave sub-page). */
+int  settings_providers_handle_tap(Settings *s, int fbfd, int x, int y);
 
 /* Flush the working copy into cfg. Returns 1 when anything differs from the
  * snapshot taken at create time (i.e. config_save is warranted). */

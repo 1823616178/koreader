@@ -308,8 +308,8 @@ static void draw_provider_card(const Ui *ui, int x, int y, const char *title,
     if (monthly_label) {
         draw_window_block(ui, ix, iy, monthly_label, &pq->monthly, snap);
     } else {
-        quota_format_timestamp(fetched, sizeof(fetched),
-                               pq->has_fetched_at, pq->fetched_at);
+        quota_format_timestamp_min(fetched, sizeof(fetched),
+                                   pq->has_fetched_at, pq->fetched_at);
         draw_info_block(ui, ix, iy, "采集", fetched, "提供商快照");
     }
 }
@@ -340,7 +340,7 @@ static void draw_info_card(const Ui *ui, int x, int y, const QuotaSnapshot *snap
     int ix = x + ui->border + ui->card_padding;
     int iy = y + ui->border + ui->card_padding;
 
-    quota_format_timestamp(ts, sizeof(ts), snap->has_generated_at, snap->generated_at);
+    quota_format_timestamp_min(ts, sizeof(ts), snap->has_generated_at, snap->generated_at);
     quota_format_percent(pct, sizeof(pct), snap->alert_percent);
     snprintf(generated, sizeof(generated), "快照 %s · 告警 %s", ts, pct);
     snprintf(selected, sizeof(selected), "%d / 6",
@@ -779,6 +779,16 @@ void ui_destroy(Ui *ui)
     free(ui);
 }
 
+void ui_set_provider_order(Ui *ui, const char *order_csv)
+{
+    if (!ui)
+        return;
+    if (!order_csv)
+        order_csv = "";
+    snprintf(ui->provider_order, sizeof(ui->provider_order), "%s", order_csv);
+}
+
+
 void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
                        const char *status_state, const char *status_detail, int loading,
                        int wifi_state, const char *ssid, int batt_pct, int batt_charging,
@@ -801,7 +811,8 @@ void ui_draw_dashboard(Ui *ui, const QuotaSnapshot *snap, const char *host,
      * connection card. Disabled providers are omitted and the remaining
      * cards pack left-to-right, top-to-bottom. Identity is stored next to
      * each rect so a later tap cannot confuse slot number with card. */
-    card_count = ui_cards_from_providers(&snap->providers, ids, UI_CARD_SLOTS);
+    card_count = ui_cards_from_providers_ex(&snap->providers, ui->provider_order,
+                                          ids, UI_CARD_SLOTS);
     rows = (card_count + 1) / 2;
     drawn_h = rows * ui->card_h + rows * ui->row_gap + ui->button_h;
     slack = ui->h - ui->title_h - drawn_h;
@@ -980,9 +991,144 @@ void ui_popup_rect(const Ui *ui, FBInkRect *out)
     popup_geom(ui, &big, &px, &py, out);
 }
 
-void ui_popup_draw(const Ui *ui, const QuotaSnapshot *snap,
-                   const char *status_state, const char *status_detail,
-                   UiCard id, FBInkRect *out)
+static void popup_info_geom(const Ui *ui, FBInkRect *out);
+
+void ui_popup_rect_for(const Ui *ui, UiCard id, FBInkRect *out)
+{
+    if (!ui || !out)
+        return;
+    if (id == UI_CARD_INFO)
+        popup_info_geom(ui, out);
+    else
+        ui_popup_rect(ui, out);
+}
+
+/* Lines of detail text that fit one info-popup page. */
+#define UI_POPUP_INFO_LINES 8
+#define UI_POPUP_INFO_COLS  42 /* UTF-8 budget; CJK ~3 bytes each */
+
+static void popup_info_geom(const Ui *ui, FBInkRect *out)
+{
+    int pad = ui_scale(ui, 16);
+    int top = ui->title_h + pad;
+    int h = ui->h - ui->title_h - ui->button_h - 2 * pad;
+    int w = ui->content_w;
+
+    if (h < ui->line_h * 4)
+        h = ui->line_h * 4;
+    out->left = (unsigned short)ui->h_padding;
+    out->top = (unsigned short)top;
+    out->width = (unsigned short)w;
+    out->height = (unsigned short)h;
+}
+
+int ui_popup_info_pages(const Ui *ui, const char *status_detail)
+{
+    char scratch[2048];
+    const char *lines[64];
+    int n;
+    int cols = UI_POPUP_INFO_COLS;
+
+    (void)ui;
+    if (!status_detail || !status_detail[0])
+        return 1;
+    n = ui_wrap_utf8_lines(status_detail, cols, scratch, sizeof(scratch),
+                           lines, 64);
+    if (n < 1)
+        return 1;
+    return (n + UI_POPUP_INFO_LINES - 1) / UI_POPUP_INFO_LINES;
+}
+
+static void draw_info_popup(const Ui *ui, const QuotaSnapshot *snap,
+                            const char *status_state, const char *status_detail,
+                            int page, FBInkRect *out)
+{
+    FBInkRect r;
+    char scratch[2048];
+    const char *lines[64];
+    int n, pages, i, y, inner_pad, btn_h, body_h;
+    const char *detail = status_detail ? status_detail : "";
+    char page_lbl[32];
+
+    (void)snap;
+    popup_info_geom(ui, &r);
+    ui_fill(ui, r.left, r.top, r.width, r.height, UI_INK_BLACK);
+    inner_pad = ui_scale(ui, 10);
+    ui_fill(ui, r.left + 2, r.top + 2, r.width - 4, r.height - 4, UI_INK_WHITE);
+
+    y = r.top + inner_pad;
+    ui_text(ui, "数据接口详情", ui->px_card_title,
+            r.left + inner_pad, y, r.width - 2 * inner_pad, ui->line_h,
+            UI_ALIGN_LEFT, FG_BLACK, 0);
+    y += ui->line_h + ui->gap3;
+    ui_text(ui, status_state ? status_state : "--", ui->px_label,
+            r.left + inner_pad, y, r.width - 2 * inner_pad, ui->line_h,
+            UI_ALIGN_LEFT, FG_BLACK, 0);
+    y += ui->line_h + ui->gap5;
+
+    n = ui_wrap_utf8_lines(detail, UI_POPUP_INFO_COLS, scratch, sizeof(scratch),
+                           lines, 64);
+    pages = n < 1 ? 1 : (n + UI_POPUP_INFO_LINES - 1) / UI_POPUP_INFO_LINES;
+    if (page < 0)
+        page = 0;
+    if (page >= pages)
+        page = pages - 1;
+
+    btn_h = ui->line_h + ui->gap3;
+    body_h = (int)r.height - (y - (int)r.top) - btn_h - inner_pad;
+    for (i = 0; i < UI_POPUP_INFO_LINES; i++) {
+        int idx = page * UI_POPUP_INFO_LINES + i;
+        int ly = y + i * (ui->line_h + ui->gap2);
+        if (idx >= n)
+            break;
+        if (ly + ui->line_h > y + body_h)
+            break;
+        ui_text(ui, lines[idx], ui->px_detail,
+                r.left + inner_pad, ly, r.width - 2 * inner_pad, ui->line_h,
+                UI_ALIGN_LEFT, FG_BLACK, 0);
+    }
+
+    if (pages > 1) {
+        int by = (int)r.top + (int)r.height - inner_pad - ui->line_h;
+        snprintf(page_lbl, sizeof(page_lbl), "<<  %d/%d  >>", page + 1, pages);
+        ui_text(ui, page_lbl, ui->px_detail,
+                r.left + inner_pad, by, r.width - 2 * inner_pad, ui->line_h,
+                UI_ALIGN_CENTER, FG_BLACK, 0);
+    } else {
+        ui_text(ui, "点任意处关闭", ui->px_detail,
+                r.left + inner_pad,
+                (int)r.top + (int)r.height - inner_pad - ui->line_h,
+                r.width - 2 * inner_pad, ui->line_h,
+                UI_ALIGN_CENTER, FG_BLACK, 0);
+    }
+    if (out)
+        *out = r;
+}
+
+int ui_popup_hit(const Ui *ui, const FBInkRect *pop, UiCard id,
+                 int pages, int x, int y)
+{
+    int mid;
+    int btn_band;
+
+    if (!ui || !pop)
+        return 0;
+    if (id != UI_CARD_INFO || pages <= 1)
+        return 0; /* any tap closes */
+    if (!ui_rect_contains(pop, x, y))
+        return 0; /* outside closes */
+    btn_band = ui->line_h + ui_scale(ui, 12);
+    if (y < (int)pop->top + (int)pop->height - btn_band)
+        return 0; /* content area closes */
+    mid = (int)pop->left + (int)pop->width / 2;
+    if (x < mid)
+        return 1; /* prev */
+    return 2;     /* next */
+}
+
+void ui_popup_draw_ex(const Ui *ui, const QuotaSnapshot *snap,
+                      const char *status_state, const char *status_detail,
+                      UiCard id, int page, FBInkRect *out)
 {
     Ui big;
     FBInkRect r;
@@ -990,12 +1136,23 @@ void ui_popup_draw(const Ui *ui, const QuotaSnapshot *snap,
 
     if (!ui || !snap || id == UI_CARD_NONE)
         return;
+    if (id == UI_CARD_INFO) {
+        draw_info_popup(ui, snap, status_state, status_detail, page, out);
+        return;
+    }
     scale_popup_ui(&big, ui);
     popup_geom(ui, &big, &px, &py, &r);
     ui_fill(ui, r.left, r.top, r.width, r.height, UI_INK_BLACK);
     draw_card_at(&big, px, py, id, snap, status_state, status_detail);
     if (out)
         *out = r;
+}
+
+void ui_popup_draw(const Ui *ui, const QuotaSnapshot *snap,
+                   const char *status_state, const char *status_detail,
+                   UiCard id, FBInkRect *out)
+{
+    ui_popup_draw_ex(ui, snap, status_state, status_detail, id, 0, out);
 }
 
 void ui_redraw_badges(Ui *ui, int wifi_state, const char *ssid,

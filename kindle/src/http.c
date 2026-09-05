@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include "watchdog.h"
+#include "mono.h"
 
 #define CONNECT_TIMEOUT_MS 45000 /* 45 s floor: the API cold-starts local services */
 #define IO_TIMEOUT_S 50
@@ -200,6 +201,95 @@ static int send_all(int fd, const char *buf, size_t len, char *errbuf, size_t er
     return 0;
 }
 
+static volatile int g_http_cancel;
+
+void http_cancel_reset(void)
+{
+    g_http_cancel = 0;
+}
+
+void http_cancel(void)
+{
+    g_http_cancel = 1;
+}
+
+int http_cancel_requested(void)
+{
+    return g_http_cancel ? 1 : 0;
+}
+
+static HttpDiag g_http_diag;
+
+void http_diag_reset(void)
+{
+    memset(&g_http_diag, 0, sizeof(g_http_diag));
+    g_http_diag.dns_ms = -1;
+    g_http_diag.connect_ms = -1;
+    g_http_diag.http_ms = -1;
+    g_http_diag.total_ms = -1;
+}
+
+const HttpDiag *http_diag_last(void)
+{
+    return &g_http_diag;
+}
+
+void http_diag_format(const HttpDiag *d, int wifi_ok, long wifi_ms,
+                      int json_ok, long json_ms,
+                      char *dst, size_t dst_size)
+{
+    const char *phase = "none";
+    const char *fail = "ok";
+
+    if (!dst || dst_size == 0)
+        return;
+    if (!d) {
+        snprintf(dst, dst_size, "(no diag)");
+        return;
+    }
+    switch (d->last_phase) {
+    case HTTP_PHASE_URL: phase = "url"; break;
+    case HTTP_PHASE_DNS: phase = "dns"; break;
+    case HTTP_PHASE_CONNECT: phase = "connect"; break;
+    case HTTP_PHASE_HTTP: phase = "http"; break;
+    case HTTP_PHASE_DONE: phase = "done"; break;
+    default: phase = "none"; break;
+    }
+    switch (d->failed_phase) {
+    case HTTP_PHASE_URL: fail = "url"; break;
+    case HTTP_PHASE_DNS: fail = "dns"; break;
+    case HTTP_PHASE_CONNECT: fail = "connect"; break;
+    case HTTP_PHASE_HTTP: fail = "http"; break;
+    case HTTP_PHASE_NONE: fail = "ok"; break;
+    default: fail = "unknown"; break;
+    }
+    snprintf(dst, dst_size,
+             "WiFi: %s (%ld ms)\n"
+             "DNS: %ld ms\n"
+             "Connect: %ld ms\n"
+             "HTTP: %ld ms (status %d)\n"
+             "JSON: %s (%ld ms)\n"
+             "Total HTTP: %ld ms\n"
+             "Last phase: %s\n"
+             "Fail stage: %s\n"
+             "Error: %s",
+             wifi_ok ? "ok" : "fail", wifi_ms,
+             d->dns_ms, d->connect_ms, d->http_ms, d->http_status,
+             json_ok ? "ok" : "fail", json_ms,
+             d->total_ms, phase, fail,
+             d->err[0] ? d->err : "-");
+}
+
+
+static int http_check_cancel(char *errbuf, size_t errbuf_size)
+{
+    if (!g_http_cancel)
+        return 0;
+    if (errbuf && errbuf_size > 0)
+        snprintf(errbuf, errbuf_size, "cancelled");
+    return 1;
+}
+
 char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
 {
     char host[256];
@@ -221,24 +311,49 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
     char *body;
     time_t body_deadline;
     int gai_rc;
+    long t0, t_dns0, t_conn0, t_http0;
+
+    http_diag_reset();
+    t0 = mono_now_ms();
+    g_http_diag.last_phase = HTTP_PHASE_URL;
 
     if (errbuf && errbuf_size > 0)
         errbuf[0] = '\0';
     if (!url || parse_url(url, host, sizeof(host), port, sizeof(port),
-                          &path, errbuf, errbuf_size) != 0)
+                          &path, errbuf, errbuf_size) != 0) {
+        g_http_diag.failed_phase = HTTP_PHASE_URL;
+        g_http_diag.total_ms = mono_now_ms() - t0;
+        if (errbuf && errbuf[0])
+            snprintf(g_http_diag.err, sizeof(g_http_diag.err), "%s", errbuf);
         return NULL;
+    }
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     wd_expect(DNS_TIMEOUT_S);
+    if (http_check_cancel(errbuf, errbuf_size)) {
+        g_http_diag.failed_phase = HTTP_PHASE_DNS;
+        snprintf(g_http_diag.err, sizeof(g_http_diag.err), "cancelled");
+        g_http_diag.total_ms = mono_now_ms() - t0;
+        return NULL;
+    }
+    g_http_diag.last_phase = HTTP_PHASE_DNS;
+    t_dns0 = mono_now_ms();
     gai_rc = getaddrinfo(host, port, &hints, &res);
+    g_http_diag.dns_ms = mono_now_ms() - t_dns0;
     if (gai_rc != 0) {
         if (errbuf && errbuf_size > 0)
             snprintf(errbuf, errbuf_size, "dns failed: %s", gai_strerror(gai_rc));
+        g_http_diag.failed_phase = HTTP_PHASE_DNS;
+        snprintf(g_http_diag.err, sizeof(g_http_diag.err), "%s",
+                 errbuf && errbuf[0] ? errbuf : "dns failed");
+        g_http_diag.total_ms = mono_now_ms() - t0;
         return NULL;
     }
 
+    g_http_diag.last_phase = HTTP_PHASE_CONNECT;
+    t_conn0 = mono_now_ms();
     for (ai = res; ai; ai = ai->ai_next) {
         if (errbuf && errbuf_size > 0)
             errbuf[0] = '\0';
@@ -248,9 +363,22 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
             break;
     }
     freeaddrinfo(res);
+    g_http_diag.connect_ms = mono_now_ms() - t_conn0;
+    if (http_check_cancel(errbuf, errbuf_size)) {
+        if (fd >= 0)
+            close(fd);
+        g_http_diag.failed_phase = HTTP_PHASE_CONNECT;
+        snprintf(g_http_diag.err, sizeof(g_http_diag.err), "cancelled");
+        g_http_diag.total_ms = mono_now_ms() - t0;
+        return NULL;
+    }
     if (fd < 0) {
         if (!errbuf || errbuf_size == 0 || errbuf[0] == '\0')
             set_err(errbuf, errbuf_size, "connect failed");
+        g_http_diag.failed_phase = HTTP_PHASE_CONNECT;
+        snprintf(g_http_diag.err, sizeof(g_http_diag.err), "%s",
+                 errbuf && errbuf[0] ? errbuf : "connect failed");
+        g_http_diag.total_ms = mono_now_ms() - t0;
         return NULL;
     }
 
@@ -263,6 +391,8 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
         snprintf(host_hdr, sizeof(host_hdr), "%s", host);
     else
         snprintf(host_hdr, sizeof(host_hdr), "%s:%s", host, port);
+    g_http_diag.last_phase = HTTP_PHASE_HTTP;
+    t_http0 = mono_now_ms();
     request_len = snprintf(request, sizeof(request),
                            "GET %s HTTP/1.0\r\n"
                            "Host: %s\r\n"
@@ -277,6 +407,11 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
         if (errbuf && errbuf_size > 0 && errbuf[0] == '\0')
             set_err(errbuf, errbuf_size, "send failed");
         close(fd);
+        g_http_diag.failed_phase = HTTP_PHASE_HTTP;
+        g_http_diag.http_ms = mono_now_ms() - t_http0;
+        snprintf(g_http_diag.err, sizeof(g_http_diag.err), "%s",
+                 errbuf && errbuf[0] ? errbuf : "send failed");
+        g_http_diag.total_ms = mono_now_ms() - t0;
         return NULL;
     }
 
@@ -295,6 +430,11 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
             set_err(errbuf, errbuf_size, "timeout");
             free(data);
             close(fd);
+            g_http_diag.failed_phase = HTTP_PHASE_HTTP;
+            g_http_diag.http_ms = mono_now_ms() - t_http0;
+            if (errbuf && errbuf[0])
+                snprintf(g_http_diag.err, sizeof(g_http_diag.err), "%s", errbuf);
+            g_http_diag.total_ms = mono_now_ms() - t0;
             return NULL;
         }
         if (len == cap) {
@@ -331,11 +471,21 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
             set_err(errbuf, errbuf_size, "timeout");
             free(data);
             close(fd);
+            g_http_diag.failed_phase = HTTP_PHASE_HTTP;
+            g_http_diag.http_ms = mono_now_ms() - t_http0;
+            if (errbuf && errbuf[0])
+                snprintf(g_http_diag.err, sizeof(g_http_diag.err), "%s", errbuf);
+            g_http_diag.total_ms = mono_now_ms() - t0;
             return NULL;
         } else {
             set_err_errno(errbuf, errbuf_size, "recv failed", errno);
             free(data);
             close(fd);
+            g_http_diag.failed_phase = HTTP_PHASE_HTTP;
+            g_http_diag.http_ms = mono_now_ms() - t_http0;
+            if (errbuf && errbuf[0])
+                snprintf(g_http_diag.err, sizeof(g_http_diag.err), "%s", errbuf);
+            g_http_diag.total_ms = mono_now_ms() - t0;
             return NULL;
         }
     }
@@ -362,6 +512,11 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
     if (code <= 0) {
         set_err(errbuf, errbuf_size, "bad response");
         free(data);
+        g_http_diag.failed_phase = HTTP_PHASE_HTTP;
+        g_http_diag.http_status = code;
+        g_http_diag.http_ms = mono_now_ms() - t_http0;
+        snprintf(g_http_diag.err, sizeof(g_http_diag.err), "bad response");
+        g_http_diag.total_ms = mono_now_ms() - t0;
         return NULL;
     }
 
@@ -380,5 +535,11 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
 
     if (status)
         *status = code;
+    g_http_diag.http_status = code;
+    g_http_diag.http_ms = mono_now_ms() - t_http0;
+    g_http_diag.last_phase = HTTP_PHASE_DONE;
+    g_http_diag.failed_phase = HTTP_PHASE_NONE;
+    g_http_diag.total_ms = mono_now_ms() - t0;
+    g_http_diag.err[0] = '\0';
     return body;
 }
