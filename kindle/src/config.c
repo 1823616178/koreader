@@ -316,7 +316,7 @@ int config_cache_load(const char *path, const char *api_url,
 {
     FILE *f;
     char line[768];
-    char file_url[512];
+    char file_url[768]; /* same bound as line[], minus the 8-byte prefix */
     long long saved = 0;
     int have_url = 0, have_json = 0;
     size_t jlen = 0;
@@ -627,7 +627,10 @@ int config_url_with_providers(char *dst, size_t dst_size,
                               const char *base_url, const char *show_providers)
 {
     char norm[1050];
-    char path[1050];
+    /* Worst case: path 1049 + stripped query 1049 + "&providers=" 11 +
+     * prov 127 + NUL = 2237. Sizing path this way keeps the append below
+     * provably non-truncating. */
+    char path[2240];
     char query[1050];
     char prov[128];
     char *q;

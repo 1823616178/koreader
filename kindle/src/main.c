@@ -850,6 +850,7 @@ int main(int argc, char **argv)
     int first_run_setup = 0; /* F07: open settings when no config */
     int open_settings_once = 0;
     int providers_changed = 0;
+    UiCard popup_after_fetch = UI_CARD_NONE; /* tapped card waiting on fresh data */
     unsigned req_gen;       /* R10: increments per fetch; drop stale results */
     int fail_streak;        /* F05: consecutive fetch failures */
     long fail_backoff_until;/* mono second until auto-refresh may retry */
@@ -1190,6 +1191,25 @@ int main(int argc, char **argv)
                 break;
         }
 
+        /* A dashboard-card tap is a user-driven refresh with a destination:
+         * only open the modal after that request has finished, so the large
+         * card is drawn from the newest snapshot.  On failure, the regular
+         * fetch path keeps the last good snapshot and exposes the error state;
+         * the requested card still opens instead of swallowing the tap. */
+        if (popup_after_fetch != UI_CARD_NONE) {
+            UiCard card = popup_after_fetch;
+
+            popup_after_fetch = UI_CARD_NONE;
+            if (run_card_popup(fbfd, input_fd, scr_w, scr_h, &cfg, ui,
+                               &snap, host, st, detail, card,
+                               &idle_deadline) < 0) {
+                fprintf(stderr, "aiquota: touch input device lost\n");
+                rc = 1;
+                goto out;
+            }
+            continue;
+        }
+
         /* READY/ERROR: park on one blocked poll until the next tap or the
          * earlier of two deadlines -- the auto-refresh tick and the idle
          * frontlight (a touch re-arms both). Taps queued in the kernel evdev
@@ -1259,13 +1279,13 @@ int main(int argc, char **argv)
 
             if (card == UI_CARD_NONE)
                 continue;
-            if (run_card_popup(fbfd, input_fd, scr_w, scr_h, &cfg, ui,
-                               &snap, host, st, detail, card,
-                               &idle_deadline) < 0) {
-                fprintf(stderr, "aiquota: touch input device lost\n");
-                rc = 1;
-                goto out;
-            }
+            /* Reuse the normal cancelable loading flow, including its visible
+             * connecting state, WiFi policy, parsing, cache and error fallback.
+             * The pending card is opened at the top of the next READY/ERROR
+             * iteration with the resulting snapshot. */
+            popup_after_fetch = card;
+            auto_cycle = 0;
+            st = ST_LOADING;
             continue;
         }
         ui_flash_button(ui, fbfd, action);

@@ -164,8 +164,12 @@ Settings *settings_create(Ui *ui, const AppConfig *cfg)
     }
     refresh_values(s);
 
-    gap = ui_scale(ui, 10);
-    row_h = ui_scale(ui, ROW_COUNT > 6 ? 42 : (ROW_COUNT > 4 ? 48 : 56));
+    /* Keep dense settings pages compact by tightening the gaps, not the
+     * controls.  The light stepper needs a 48-unit visual/touch target; the
+     * old 42-unit row made both keys spill outside ROW_LIGHT, while partial
+     * refreshes still covered only the row and left clipped/ghosted edges. */
+    gap = ui_scale(ui, ROW_COUNT > 6 ? 4 : 10);
+    row_h = ui_scale(ui, ROW_COUNT > 4 ? 48 : 56);
 
     /* Top-aligned under the title bar, like a form; leftover space stays at
      * the bottom (the keypad fills its screen, this page is a short list). */
@@ -309,18 +313,23 @@ static void draw_step_key(const Settings *s, const FBInkRect *r, const char *gly
     ui_text(ui, glyph, ui->px_card_title, x, y, tw, th, UI_ALIGN_LEFT, FG_BLACK, 0);
 }
 
-/* Current level in the box between the stepper keys; gray while off. */
+/* Current level in the box between the stepper keys; gray while off.  Draw
+ * the readout as part of the same three-piece control so its placement does
+ * not depend on the width of a one- vs. two-digit value. */
 static void draw_light_level(const Settings *s)
 {
     const Ui *ui = s->ui;
     const FBInkRect *r = &s->light_level_box;
-    int tw = 0, th = 0, x, y;
+    int tw = 0, th = 0, y;
+    int inset = ui->border;
 
-    if (ui_measure(ui, s->level_text, ui->px_label, &tw, &th) != 0 || tw <= 0)
+    draw_frame(ui, r);
+    if (ui_measure(ui, s->level_text, ui->px_card_title, &tw, &th) != 0 ||
+        tw <= 0 || th <= 0)
         return;
-    x = r->left + (r->width - tw) / 2;
     y = r->top + (r->height - th) / 2;
-    ui_text(ui, s->level_text, ui->px_label, x, y, tw, th, UI_ALIGN_LEFT,
+    ui_text(ui, s->level_text, ui->px_card_title,
+            r->left + inset, y, r->width - 2 * inset, th, UI_ALIGN_CENTER,
             s->light_ok && s->light_on ? FG_BLACK : FG_GRAY8, 0);
 }
 
