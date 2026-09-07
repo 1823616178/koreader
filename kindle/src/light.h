@@ -15,12 +15,15 @@ int light_set_intensity(int n); /* clamp then set; 0 ok, -1 on fail */
 /* [0, max]; max < 1 uses LIGHT_MAX_FALLBACK. */
 int light_clamp(int n, int max);
 
-/* Last positive level successfully set by the user or by an idle restore
- * (recorded inside light_set_intensity; setting 0 never overwrites it).
- * 0 = no positive level known yet. Process-local only: it survives across
- * settings-page sessions within one run, but is never persisted and never
- * becomes an AppConfig key. */
-int light_last_on(void);
+/* The level "on" means while the light is off: the settings page's
+ * turn-back-on target. Written only through light_set_last_on, from the
+ * moments that express a chosen level (settings page opened on a lit light,
+ * an up-step, a toggle-off); a stepper descent to 0 deliberately does NOT
+ * write it, so the target survives turning the light off. 0 = no positive
+ * level known yet (callers fall back to max/2). Process-local only: never
+ * persisted, never an AppConfig key. */
+int  light_last_on(void);
+void light_set_last_on(int n); /* n <= 0 ignored: off is not a level */
 
 /* Idle frontlight: the parked dashboard's biggest avoidable draw is the LED,
  * so the main loop dims it to 0 after a few idle minutes and restores it on

@@ -34,7 +34,6 @@ struct Settings {
     int light_ok;           /* 1 when powerd answered flIntensity */
     int light_on;           /* intensity > 0 */
     int light_level;        /* last set / last read, 0 when off */
-    int light_last_on;      /* restored when toggling 前光 back on */
     int light_max;          /* flMaxIntensity, or LIGHT_MAX_FALLBACK */
 };
 
@@ -116,22 +115,12 @@ Settings *settings_create(Ui *ui, const AppConfig *cfg)
             s->light_max = max >= 1 ? max : LIGHT_MAX_FALLBACK;
             s->light_level = light_clamp(cur, s->light_max);
             s->light_on = s->light_level > 0;
-            if (s->light_on) {
-                s->light_last_on = s->light_level;
-            } else {
-                /* Off: seed the toggle-back-on target from light.c's user
-                 * slot -- the last positive level this process applied. It
-                 * survives across settings-page sessions (the idle-dim slot
-                 * never does: the main loop restores and clears it before
-                 * this page opens). Process-local only, never persisted,
-                 * never a config key; clamp into range, then max/2 as the
-                 * fallback when no positive level is known. */
-                s->light_last_on = light_clamp(light_last_on(), s->light_max);
-                if (s->light_last_on < 1)
-                    s->light_last_on = s->light_max / 2;
-                if (s->light_last_on < 1)
-                    s->light_last_on = 1;
-            }
+            if (s->light_on)
+                light_set_last_on(s->light_level); /* freshen the slot from
+                                                    * powerd's live value */
+            /* Off: nothing to seed -- the stepper/toggle read
+             * light_last_on() themselves, with max/2 as the fallback when
+             * no positive level is known. */
         }
     }
     refresh_values(s);
@@ -346,7 +335,11 @@ static void restore_row(const Settings *s, int fbfd, int i)
  * the caller repaints, so a no-op click (!light_ok, already at 0, at the
  * ceiling, powerd refusing) still un-inverts the flashed key. A click whose
  * clamped target changes neither level nor on/off skips the lipc child
- * process entirely -- powerd's side would not change either. */
+ * process entirely -- powerd's side would not change either.
+ * Only UP clicks update the remembered on-level: stepping down through 5..1
+ * to 0 is how the light gets turned off here, and recording those pass-through
+ * levels would decay the restore target to 1 -- which maps to ~2/4095 on the
+ * backlight driver, i.e. the light comes back visibly still off. */
 static void step_light(Settings *s, int up)
 {
     int next = -1; /* -1: nothing to apply */
@@ -356,7 +349,7 @@ static void step_light(Settings *s, int up)
             if (s->light_on) {
                 next = s->light_level + 1; /* light_clamp caps at light_max */
             } else {
-                next = s->light_last_on; /* off -> on: same rule as the toggle */
+                next = light_last_on(); /* off -> on: same rule as the toggle */
                 if (next < 1)
                     next = s->light_max / 2;
                 if (next < 1)
@@ -373,8 +366,8 @@ static void step_light(Settings *s, int up)
                 light_set_intensity(next) == 0) {
                 s->light_level = next;
                 s->light_on = next > 0;
-                if (next > 0)
-                    s->light_last_on = next;
+                if (up && next > 0)
+                    light_set_last_on(next);
             }
         }
     }
@@ -428,10 +421,10 @@ SettingsHit settings_handle_tap(Settings *s, int fbfd, int x, int y)
         }
         if (s->light_on) {
             if (s->light_level > 0)
-                s->light_last_on = s->light_level;
+                light_set_last_on(s->light_level); /* remember where on was */
             next = 0;
         } else {
-            next = s->light_last_on;
+            next = light_last_on();
             if (next < 1)
                 next = s->light_max / 2;
             if (next < 1)

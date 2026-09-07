@@ -97,12 +97,16 @@ int light_get_max(void)
     return v;
 }
 
-/* Last positive level this process applied successfully. Written only by
- * light_set_intensity on a successful set with n > 0, so light_idle_off's
- * set(0) can never clobber it and light_idle_restore's set(saved) re-seeds
- * it with exactly the level the settings page should offer next. A hint,
- * not state: powerd persists the live intensity itself, and this slot stays
- * process-local on purpose -- never written to the config file. */
+/* The level "on" means when the light is currently off: what the settings
+ * page's stepper/toggle offer as the turn-back-on target. Written explicitly
+ * by light_set_last_on from the moments that express a chosen level (page
+ * opened on a lit light, an up-step, a toggle-off) -- never by
+ * light_set_intensity itself, because a stepper descent applies every
+ * intermediate level on the way to 0 and would decay the slot to 1, which
+ * the backlight driver maps to ~2/4095: the light would come back visibly
+ * still off. A hint, not state: powerd persists the live intensity itself,
+ * and this slot stays process-local on purpose -- never written to the
+ * config file. */
 static int user_last_on;
 
 int light_set_intensity(int n)
@@ -112,14 +116,18 @@ int light_set_intensity(int n)
     n = light_clamp(n, max);
     if (lipc_set_int("flIntensity", n) != 0)
         return -1;
-    if (n > 0)
-        user_last_on = n;
     return 0;
 }
 
 int light_last_on(void)
 {
     return user_last_on;
+}
+
+void light_set_last_on(int n)
+{
+    if (n > 0)
+        user_last_on = n;
 }
 
 /* --- idle dim --------------------------------------------------------------

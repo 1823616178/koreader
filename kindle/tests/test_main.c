@@ -663,6 +663,23 @@ static void test_light_clamp_and_no_lipc(void)
     CHECK(light_idle_restore() == 0);
     light_idle_cancel();
     CHECK(light_idle_level() == 0);
+
+    /* The last-on slot only takes positive levels through
+     * light_set_last_on; 0/negative never clobber it (a descent to off must
+     * not decay the restore target). */
+    CHECK(light_last_on() == 0);
+    light_set_last_on(0);
+    light_set_last_on(-3);
+    CHECK(light_last_on() == 0);
+    light_set_last_on(7);
+    CHECK(light_last_on() == 7);
+    light_set_last_on(0);
+    CHECK(light_last_on() == 7);
+    light_set_last_on(15);
+    CHECK(light_last_on() == 15);
+    /* A failed set must not record: no lipc on host. */
+    CHECK(light_set_intensity(3) == -1);
+    CHECK(light_last_on() == 15);
 }
 
 static void test_ui_batt_cells(void)
