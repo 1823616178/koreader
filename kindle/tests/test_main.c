@@ -29,6 +29,7 @@
 #include "quota.h"
 #include "ui.h"
 #include "watchdog.h"
+#include "mono.h"
 
 static int failures = 0;
 static const char *current = "";
@@ -264,6 +265,79 @@ static void test_config_roundtrip(void)
             fclose(f);
         }
     }
+}
+
+static void test_config_save_atomic(void)
+{
+    const char *path = "/tmp/aiquota_cfg_atomic.ini";
+    const char *tmp = "/tmp/aiquota_cfg_atomic.ini.tmp";
+    const char *bak = "/tmp/aiquota_cfg_atomic.ini.bak";
+    AppConfig cfg;
+    AppConfig back;
+    FILE *f;
+    char buf[256];
+
+    unlink(path);
+    unlink(tmp);
+    unlink(bak);
+
+    config_defaults(&cfg);
+    strcpy(cfg.api_url, "http://keep.example/api/usage");
+    cfg.touch_swap_xy = 1;
+    CHECK(config_save(&cfg, path) == 0);
+    CHECK(access(path, R_OK) == 0);
+    /* Temp must not linger after a successful save. */
+    CHECK(access(tmp, F_OK) != 0);
+
+    /* Second save keeps a .bak of the previous good file. */
+    strcpy(cfg.api_url, "http://new.example/api/usage");
+    cfg.touch_swap_xy = 0;
+    CHECK(config_save(&cfg, path) == 0);
+    CHECK(access(bak, R_OK) == 0);
+    f = fopen(bak, "r");
+    CHECK(f != NULL);
+    if (f) {
+        CHECK(fgets(buf, sizeof(buf), f) != NULL);
+        CHECK(strstr(buf, "http://keep.example/api/usage") != NULL);
+        fclose(f);
+    }
+
+    config_defaults(&back);
+    CHECK(config_load(&back, path) == 0);
+    CHECK(strcmp(back.api_url, "http://new.example/api/usage") == 0);
+    CHECK(back.touch_swap_xy == 0);
+
+    /* Refuse a path that cannot be written: existing file stays readable and
+     * the caller must see failure (never a silent truncate). */
+    {
+        const char *ro = "/tmp/aiquota_cfg_readonly.ini";
+        AppConfig victim;
+
+        unlink(ro);
+        config_defaults(&victim);
+        strcpy(victim.api_url, "http://old.example/api/usage");
+        victim.wifi_auto_off = 0;
+        CHECK(config_save(&victim, ro) == 0);
+
+        /* Make the directory briefly unwritable by aiming at a non-dir parent
+         * component: saving under a file-as-directory must fail. */
+        CHECK(config_save(&victim, "/tmp/aiquota_cfg_readonly.ini/nested") != 0);
+
+        config_defaults(&back);
+        CHECK(config_load(&back, ro) == 0);
+        CHECK(strcmp(back.api_url, "http://old.example/api/usage") == 0);
+        CHECK(back.wifi_auto_off == 0);
+        unlink(ro);
+        unlink("/tmp/aiquota_cfg_readonly.ini.bak");
+    }
+
+    /* Empty / null path must fail without crashing. */
+    CHECK(config_save(&cfg, "") != 0);
+    CHECK(config_save(&cfg, NULL) != 0);
+
+    unlink(path);
+    unlink(bak);
+    unlink(tmp);
 }
 
 static void test_parse_full_example(void)
@@ -621,21 +695,36 @@ static void test_input_transform(void)
     check_transform(0, 0, 0, 600, 800, 4095, 4095, 0, 4095, 0, 4095, 599, 799);
     check_transform(0, 0, 0, 600, 800, 2048, 2048, 0, 4095, 0, 4095, 299, 399);
 
-    /* swap_xy: the already-scaled axes are exchanged. */
-    check_transform(1, 0, 0, 600, 800, 4095, 0, 0, 4095, 0, 4095, 0, 599);
+    /* swap_xy: raw axes (and their ranges) swap BEFORE scaling, so a
+     * non-square panel maps against the correct target dimension.
+     * Regression: the old scale-then-swap path produced (0,599)/(399,299). */
+    check_transform(1, 0, 0, 600, 800, 4095, 0, 0, 4095, 0, 4095, 0, 799);
+    check_transform(1, 0, 0, 600, 800, 2048, 2048, 0, 4095, 0, 4095, 299, 399);
+    check_transform(1, 0, 0, 600, 800, 0, 4095, 0, 4095, 0, 4095, 599, 0);
+    check_transform(1, 0, 0, 600, 800, 0, 0, 0, 4095, 0, 4095, 0, 0);
+    check_transform(1, 0, 0, 600, 800, 4095, 4095, 0, 4095, 0, 4095, 599, 799);
 
     /* mirror_x / mirror_y flip within the screen bounds. */
     check_transform(0, 1, 0, 600, 800, 0, 0, 0, 4095, 0, 4095, 599, 0);
     check_transform(0, 0, 1, 600, 800, 0, 0, 0, 4095, 0, 4095, 0, 799);
+    check_transform(0, 1, 1, 600, 800, 0, 0, 0, 4095, 0, 4095, 599, 799);
+
+    /* All swap/mirror combinations on a non-square panel (corners). */
+    check_transform(1, 1, 0, 600, 800, 4095, 0, 0, 4095, 0, 4095, 599, 799);
+    check_transform(1, 0, 1, 600, 800, 4095, 0, 0, 4095, 0, 4095, 0, 0);
+    check_transform(1, 1, 1, 600, 800, 4095, 0, 0, 4095, 0, 4095, 599, 0);
+    check_transform(1, 1, 1, 600, 800, 0, 4095, 0, 4095, 0, 4095, 0, 799);
 
     /* swap + both mirrors on a square screen stays exact. */
     check_transform(1, 1, 1, 800, 800, 0, 4095, 0, 4095, 0, 4095, 0, 799);
 
     /* Raw values outside the reported range clamp to the edges. */
     check_transform(0, 0, 0, 600, 800, 5000, -100, 0, 4095, 0, 4095, 599, 0);
+    check_transform(1, 0, 0, 600, 800, 5000, -100, 0, 4095, 0, 4095, 0, 799);
 
     /* max == min must not divide by zero; the dead axis maps to 0. */
     check_transform(0, 0, 0, 600, 800, 100, 2048, 100, 100, 0, 4095, 0, 399);
+    check_transform(1, 0, 0, 600, 800, 100, 2048, 100, 100, 0, 4095, 299, 0);
 }
 
 static void test_light_clamp_and_no_lipc(void)
@@ -1076,6 +1165,152 @@ static void test_input_wait_tap_timeout(void)
 
 /* The beat must witness the main thread: past the announced deadline it stops,
  * which is what turns a main-thread hang into a watchdog.sh kill. */
+
+static void test_quota_display_sig(void)
+{
+    QuotaSnapshot a, b;
+    unsigned long long s1, s2;
+    char *json;
+    size_t n;
+
+    /* Two JSON bodies that differ only in generatedAt milliseconds within the
+     * same wall-clock minute must share a display signature. */
+    CHECK(quota_parse_snapshot(EXAMPLE_JSON, &a) == 0);
+    b = a;
+    b.generated_at = a.generated_at + 500; /* +0.5s, same minute */
+    s1 = quota_display_sig(&a, "已连接", "http://x/api/usage");
+    s2 = quota_display_sig(&b, "已连接", "http://x/api/usage");
+    CHECK(s1 == s2);
+
+    /* A real quota change must dirty the signature. */
+    b = a;
+    b.claude.five.used = 99.0;
+    s2 = quota_display_sig(&b, "已连接", "http://x/api/usage");
+    CHECK(s1 != s2);
+
+    /* Whitespace / key-order-equivalent parse of the same values matches. */
+    n = strlen(EXAMPLE_JSON);
+    json = malloc(n + 8);
+    CHECK(json != NULL);
+    if (json) {
+        /* Insert a space after the first brace -- parser ignores whitespace. */
+        json[0] = '{';
+        json[1] = ' ';
+        memcpy(json + 2, EXAMPLE_JSON + 1, n);
+        CHECK(quota_parse_snapshot(json, &b) == 0);
+        /* Align generatedAt to the same minute-bucket as a for a fair compare
+         * in case the fixture and parse path differ on other fields. */
+        b.generated_at = a.generated_at;
+        s2 = quota_display_sig(&b, "已连接", "http://x/api/usage");
+        CHECK(s1 == s2);
+        free(json);
+    }
+
+    /* Minute formatter drops seconds. */
+    {
+        char full[32], mins[32];
+        quota_format_timestamp(full, sizeof(full), 1, 1785695952333LL);
+        quota_format_timestamp_min(mins, sizeof(mins), 1, 1785695952333LL);
+        CHECK(strlen(mins) == 11); /* NN-NN NN:NN */
+        CHECK(strstr(full, mins) == full);
+    }
+}
+
+static void test_net_wifi_ownership(void)
+{
+    /* Release without ownership is a no-op. */
+    net_wifi_set_owned_for_test(0);
+    CHECK(net_wifi_owned_for_test() == 0);
+    net_release_wifi();
+    CHECK(net_wifi_owned_for_test() == 0);
+
+    /* On the host, lipc is missing so a release attempt fails and ownership
+     * must stick for a later retry (R04). */
+    net_wifi_set_owned_for_test(1);
+    CHECK(net_wifi_owned_for_test() == 1);
+    net_release_wifi();
+    CHECK(net_wifi_owned_for_test() == 1);
+
+    /* Clearing via the test seam still works. */
+    net_wifi_set_owned_for_test(0);
+    CHECK(net_wifi_owned_for_test() == 0);
+}
+
+static void test_ui_wrap_utf8_lines(void)
+{
+    char scratch[512];
+    const char *lines[16];
+    int n;
+
+    n = ui_wrap_utf8_lines("abcdef", 3, scratch, sizeof(scratch), lines, 16);
+    CHECK(n == 2);
+    CHECK(strcmp(lines[0], "abc") == 0);
+    CHECK(strcmp(lines[1], "def") == 0);
+
+    /* CJK: 3-byte codepoints, budget 6 bytes => 2 chars per line. */
+    n = ui_wrap_utf8_lines("中文测试", 6, scratch, sizeof(scratch), lines, 16);
+    CHECK(n == 2);
+    CHECK(strcmp(lines[0], "中文") == 0);
+    CHECK(strcmp(lines[1], "测试") == 0);
+
+    /* Long URL breaks on / or ? when possible. */
+    n = ui_wrap_utf8_lines("http://example.com/api/usage?x=1", 20,
+                           scratch, sizeof(scratch), lines, 16);
+    CHECK(n >= 2);
+
+    /* Empty / null. */
+    CHECK(ui_wrap_utf8_lines("", 10, scratch, sizeof(scratch), lines, 16) == 0);
+    CHECK(ui_wrap_utf8_lines(NULL, 10, scratch, sizeof(scratch), lines, 16) == 0);
+}
+
+
+static void test_config_cache_and_light_idle(void)
+{
+    const char *path = "/tmp/aiquota_cache_test.dat";
+    char json[512];
+    long long saved = 0;
+    AppConfig cfg;
+
+    unlink(path);
+    CHECK(config_clamp_light_idle(0) == 0);
+    CHECK(config_clamp_light_idle(3) == 3);
+    CHECK(config_clamp_light_idle(99) == CONFIG_LIGHT_IDLE_MAX);
+    CHECK(config_clamp_light_idle(-1) == CONFIG_LIGHT_IDLE_DEFAULT);
+
+    CHECK(config_cache_save(path, "http://a/api/usage",
+                            "{\"displayMode\":\"used\"}", 12345) == 0);
+    CHECK(config_cache_load(path, "http://b/api/usage", json, sizeof(json),
+                            &saved) != 0); /* URL mismatch */
+    CHECK(config_cache_load(path, "http://a/api/usage", json, sizeof(json),
+                            &saved) == 0);
+    CHECK(saved == 12345);
+    CHECK(strstr(json, "displayMode") != NULL);
+
+    config_defaults(&cfg);
+    CHECK(cfg.light_idle_off_min == CONFIG_LIGHT_IDLE_DEFAULT);
+    CHECK(cfg.display_mode_pref == 0);
+    CHECK(cfg.config_version == CONFIG_VERSION_CURRENT);
+    unlink(path);
+}
+
+static void test_http_cancel_flag(void)
+{
+    http_cancel_reset();
+    CHECK(http_cancel_requested() == 0);
+    http_cancel();
+    CHECK(http_cancel_requested() == 1);
+    http_cancel_reset();
+    CHECK(http_cancel_requested() == 0);
+}
+
+static void test_mono_now_s(void)
+{
+    long a = mono_now_s();
+    long b = mono_now_s();
+    CHECK(b >= a);
+    CHECK(a > 0);
+}
+
 static void test_wd_should_beat(void)
 {
     long long now = (long long)time(NULL);
@@ -1102,10 +1337,149 @@ static void test_wd_should_beat(void)
     CHECK(!wd_should_beat(now + 10));
 }
 
+
+static void test_providers_pref_and_url(void)
+{
+    char list[128];
+    char url[768];
+    ProviderSelection sel;
+    UiCard ids[UI_CARD_SLOTS];
+    int n;
+
+    CHECK(config_provider_known("grok"));
+    CHECK(config_provider_known("agy"));
+    CHECK(!config_provider_known("nope"));
+
+    n = config_providers_normalize(list, sizeof(list),
+                                   "claude, grok, claude, unknown,agy");
+    CHECK(n == 3);
+    CHECK(strcmp(list, "claude,grok,agy") == 0);
+
+    /* Empty / all-invalid -> default (never all-off). */
+    n = config_providers_normalize(list, sizeof(list), "");
+    CHECK(n == CONFIG_PROVIDERS_MAX);
+    CHECK(strcmp(list, CONFIG_PROVIDERS_DEFAULT) == 0);
+    n = config_providers_normalize(list, sizeof(list), "foo,bar");
+    CHECK(n == CONFIG_PROVIDERS_MAX);
+
+    snprintf(list, sizeof(list), "%s", "grok");
+    CHECK(config_providers_toggle(list, sizeof(list), "grok") == -1); /* refuse */
+    CHECK(strcmp(list, "grok") == 0);
+    CHECK(config_providers_toggle(list, sizeof(list), "claude") == 0);
+    CHECK(strcmp(list, "grok,claude") == 0);
+    CHECK(config_providers_toggle(list, sizeof(list), "grok") == 0);
+    CHECK(strcmp(list, "claude") == 0);
+
+    snprintf(list, sizeof(list), "%s", "grok,claude,kimi");
+    CHECK(config_providers_move(list, sizeof(list), "claude", -1) == 0);
+    CHECK(strcmp(list, "claude,grok,kimi") == 0);
+    CHECK(config_providers_move(list, sizeof(list), "claude", +1) == 0);
+    CHECK(strcmp(list, "grok,claude,kimi") == 0);
+
+    config_providers_to_selection("kimi,agy", &sel);
+    CHECK(!sel.grok && sel.kimi && sel.agy && !sel.claude);
+
+    CHECK(config_url_with_providers(url, sizeof(url),
+                                    "http://h/api/usage?foo=1&providers=old&tools=x",
+                                    "claude,grok") == 0);
+    CHECK(strstr(url, "foo=1") != NULL);
+    CHECK(strstr(url, "providers=claude,grok") != NULL);
+    CHECK(strstr(url, "providers=old") == NULL);
+    CHECK(strstr(url, "tools=") == NULL);
+
+    /* Card order follows CSV; AGY still expands to two cards. */
+    memset(&sel, 0, sizeof(sel));
+    sel.kimi = 1;
+    sel.grok = 1;
+    sel.agy = 1;
+    n = ui_cards_from_providers_ex(&sel, "agy,kimi,grok", ids, UI_CARD_SLOTS);
+    CHECK(n == 5);
+    CHECK(ids[0] == UI_CARD_AGY_GEMINI);
+    CHECK(ids[1] == UI_CARD_AGY_THIRD);
+    CHECK(ids[2] == UI_CARD_KIMI);
+    CHECK(ids[3] == UI_CARD_GROK);
+    CHECK(ids[4] == UI_CARD_INFO);
+}
+
+static void test_config_providers_roundtrip_and_migrate(void)
+{
+    const char *path = "/tmp/aiquota_cfg_prov.ini";
+    AppConfig cfg, back;
+
+    unlink(path);
+    unlink("/tmp/aiquota_cfg_prov.ini.bak");
+    config_defaults(&cfg);
+    snprintf(cfg.show_providers, sizeof(cfg.show_providers), "%s",
+             "agy,claude");
+    cfg.display_mode_pref = 3; /* large */
+    cfg.refresh_preset = 2;
+    cfg.config_version = CONFIG_VERSION_CURRENT;
+    CHECK(config_save(&cfg, path) == 0);
+    /* Second save creates .bak from the first good file (R05). */
+    CHECK(config_save(&cfg, path) == 0);
+
+    config_defaults(&back);
+    CHECK(config_load(&back, path) == 0);
+    CHECK(strcmp(back.show_providers, "agy,claude") == 0);
+    CHECK(back.display_mode_pref == 3);
+    CHECK(back.refresh_preset == 2);
+    CHECK(back.config_version == CONFIG_VERSION_CURRENT);
+
+    /* Corrupt primary; recover from .bak written by prior save. */
+    {
+        FILE *f = fopen(path, "w");
+        CHECK(f != NULL);
+        /* Truncate to empty: load returns 0 but leaves defaults — force
+         * unreadable by removing the file and leaving only .bak. */
+        fclose(f);
+        unlink(path);
+    }
+    config_defaults(&back);
+    CHECK(config_load_with_backup(&back, path) == 0);
+    CHECK(strcmp(back.show_providers, "agy,claude") == 0);
+
+    /* Migrate v1 -> current. */
+    config_defaults(&cfg);
+    cfg.config_version = 1;
+    cfg.show_providers[0] = '\0';
+    CHECK(config_migrate(&cfg) == 1);
+    CHECK(cfg.config_version == CONFIG_VERSION_CURRENT);
+    CHECK(strcmp(cfg.show_providers, CONFIG_PROVIDERS_DEFAULT) == 0);
+
+    CHECK(config_refresh_preset_minutes(1) == 0);
+    CHECK(config_refresh_preset_minutes(2) == 5);
+    CHECK(config_refresh_preset_minutes(3) == 30);
+    CHECK(config_refresh_preset_minutes(0) == -1);
+
+    unlink(path);
+    unlink("/tmp/aiquota_cfg_prov.ini.bak");
+}
+
+static void test_http_diag_format(void)
+{
+    HttpDiag d;
+    char buf[512];
+
+    memset(&d, 0, sizeof(d));
+    d.last_phase = HTTP_PHASE_DNS;
+    d.failed_phase = HTTP_PHASE_DNS;
+    d.dns_ms = 12;
+    d.connect_ms = -1;
+    d.http_ms = -1;
+    d.total_ms = 15;
+    snprintf(d.err, sizeof(d.err), "dns failed: nodename");
+    http_diag_format(&d, 1, 3, 0, 0, buf, sizeof(buf));
+    CHECK(strstr(buf, "WiFi: ok") != NULL);
+    CHECK(strstr(buf, "DNS: 12 ms") != NULL);
+    CHECK(strstr(buf, "Fail stage: dns") != NULL);
+    CHECK(strstr(buf, "dns failed") != NULL);
+}
+
 int main(void)
 {
     RUN(test_normalize_url);
     RUN(test_config_roundtrip);
+    RUN(test_config_save_atomic);
     RUN(test_parse_full_example);
     RUN(test_parse_provider_selection);
     RUN(test_parse_opencode_names_and_status);
@@ -1120,6 +1494,12 @@ int main(void)
     RUN(test_input_transform);
     RUN(test_input_wait_tap);
     RUN(test_input_wait_tap_timeout);
+    RUN(test_quota_display_sig);
+    RUN(test_config_cache_and_light_idle);
+    RUN(test_http_cancel_flag);
+    RUN(test_mono_now_s);
+    RUN(test_net_wifi_ownership);
+    RUN(test_ui_wrap_utf8_lines);
     RUN(test_wd_should_beat);
     RUN(test_net_sanitize_ssid);
     RUN(test_net_parse_charging);
@@ -1127,6 +1507,9 @@ int main(void)
     RUN(test_light_clamp_and_no_lipc);
     RUN(test_ui_batt_cells);
     RUN(test_ui_cards_from_providers);
+    RUN(test_providers_pref_and_url);
+    RUN(test_config_providers_roundtrip_and_migrate);
+    RUN(test_http_diag_format);
     RUN(test_ui_rect_contains);
     RUN(test_ui_hit_card);
 

@@ -1,8 +1,9 @@
 #!/bin/sh
 # aiquota watchdog: last-resort framework restore, started by aiquota.sh with
-# the wrapper's PID as $1. Runs trap-immune (and via setsid when available) so
-# it survives the wrapper being killed, and inherits the wrapper's OOM
-# immunity (oom_score_adj -1000), re-asserted below for a manual start.
+# the wrapper's PID (also the session id) as $1/$2. Runs trap-immune (and via
+# setsid when available) so it survives the wrapper being killed, and inherits
+# the wrapper's OOM immunity (oom_score_adj -1000), re-asserted below for a
+# manual start.
 #
 # Three duties, escalating:
 #   1. While the wrapper lives, watch the app's heartbeat file. The beat only
@@ -15,11 +16,18 @@
 #      repaints over the stuck app, which is left for the next reboot.
 #   3. When the wrapper dies, check whether cvm is still STOPped (state T in
 #      /proc): if so, the wrapper died without its trap running, so restore
-#      here. A normal exit leaves cvm running and we do nothing.
+#      here -- but ONLY when this session is still the active one. A newer
+#      session that has already re-frozen the framework must not be undone.
+#
+# All paths only delete this session's ping/ready/dump files.
 
 trap "" TERM INT HUP
 
 BIN=/mnt/us/extensions/aiquota/bin
+AIQUOTA_TMP=${AIQUOTA_TMP:-/var/tmp}
+AIQUOTA_ACTIVE=${AIQUOTA_ACTIVE:-$AIQUOTA_TMP/aiquota.active}
+AIQUOTA_LOCK=${AIQUOTA_LOCK:-$AIQUOTA_TMP/aiquota.lock}
+
 AIQUOTA_RESTORE_LIB=1
 . "$BIN/restore.sh" || exit 1
 
@@ -27,7 +35,17 @@ printf '%s\n' -1000 > /proc/self/oom_score_adj 2>/dev/null ||
     printf '%s\n' -17 > /proc/self/oom_adj 2>/dev/null
 
 wrapper=$1
-ping=/var/tmp/aiquota.ping
+sid=${2:-$1}
+[ -n "$wrapper" ] || exit 1
+[ -n "$sid" ] || sid=$wrapper
+
+ping=$AIQUOTA_TMP/aiquota.${sid}.ping
+ready=$AIQUOTA_TMP/aiquota.${sid}.wdready
+AIQUOTA_FB_DUMP=$AIQUOTA_TMP/aiquota.${sid}.fb.dump
+export AIQUOTA_FB_DUMP AIQUOTA_TMP AIQUOTA_ACTIVE AIQUOTA_LOCK
+
+# Advertise readiness so the launcher can freeze safely.
+: > "$ready"
 
 # The app beats every 30 s and every blocking phase it enters is bounded by a
 # deadline of its own, so 120 s of silence is already four missed beats. The
@@ -39,6 +57,15 @@ MAX_KILLS=2 # then escalate: SIGKILL is not going to work on this process
 
 stale=0  # consecutive stale-heartbeat observations
 kills=0  # kill -9 attempts made
+
+session_is_ours() {
+    [ -f "$AIQUOTA_ACTIVE" ] || return 1
+    [ "$(cat "$AIQUOTA_ACTIVE" 2>/dev/null)" = "$sid" ]
+}
+
+cleanup_ours() {
+    aiquota_cleanup_session "$sid"
+}
 
 # kill -0 still succeeds while the wrapper is a zombie (its launcher has not
 # reaped it yet), which would spin this loop forever: /proc state Z counts as
@@ -58,8 +85,13 @@ while kill -0 "$wrapper" 2>/dev/null &&
                     killall -9 aiquota 2>/dev/null
                     kills=$((kills + 1))
                 elif pidof aiquota >/dev/null 2>&1; then
-                    restore_framework
-                    rm -f "$ping"
+                    # Only escalate while we still own the session.
+                    if session_is_ours; then
+                        restore_framework
+                        aiquota_clear_active "$sid"
+                        aiquota_release_lock "$sid"
+                    fi
+                    cleanup_ours
                     exit 0
                 fi
             fi
@@ -71,10 +103,17 @@ while kill -0 "$wrapper" 2>/dev/null &&
 done
 
 sleep 2 # let the wrapper's own EXIT trap finish a normal restore first
-cvm_pid=$(pidof cvm 2>/dev/null | awk '{print $1}')
-if [ -n "$cvm_pid" ] &&
-   [ "$(awk '{print $3}' /proc/"$cvm_pid"/stat 2>/dev/null)" = "T" ]; then
-    restore_framework
+
+# Fallback restore only for OUR frozen session. If a new launcher has already
+# taken AIQUOTA_ACTIVE, cvm being STOP is intentional -- leave it alone.
+if session_is_ours; then
+    cvm_pid=$(pidof cvm 2>/dev/null | awk '{print $1}')
+    if [ -n "$cvm_pid" ] &&
+       [ "$(awk '{print $3}' /proc/"$cvm_pid"/stat 2>/dev/null)" = "T" ]; then
+        restore_framework
+        aiquota_clear_active "$sid"
+        aiquota_release_lock "$sid"
+    fi
 fi
 
-rm -f "$ping"
+cleanup_ours

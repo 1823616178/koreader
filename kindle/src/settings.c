@@ -18,7 +18,9 @@
 #include <string.h>
 #include <unistd.h>
 
-enum { ROW_URL = 0, ROW_WIFI, ROW_REFRESH, ROW_LIGHT, ROW_COUNT };
+enum { ROW_URL = 0, ROW_WIFI, ROW_REFRESH, ROW_IDLE, ROW_DISPLAY, ROW_PROVIDERS,
+       ROW_DIAGNOSE, ROW_LIGHT, ROW_COUNT };
+enum { PROV_COUNT = CONFIG_PROVIDERS_MAX };
 
 struct Settings {
     Ui *ui;                 /* non-owning: geometry, font, batch-draw config */
@@ -35,6 +37,12 @@ struct Settings {
     int light_on;           /* intensity > 0 */
     int light_level;        /* last set / last read, 0 when off */
     int light_max;          /* flMaxIntensity, or LIGHT_MAX_FALLBACK */
+    /* F02 providers sub-page geometry */
+    FBInkRect prov_row[PROV_COUNT];
+    FBInkRect prov_up[PROV_COUNT];
+    FBInkRect prov_dn[PROV_COUNT];
+    FBInkRect prov_back;
+    char prov_warn[64];     /* "need >=1" flash text */
 };
 
 static const struct {
@@ -43,7 +51,15 @@ static const struct {
     { "接口地址" },
     { "刷新后关WiFi" },
     { "自动刷新" },
+    { "Idle light" }, /* F06: minutes; ASCII to avoid font rebuild */
+    { "Display" },    /* F04: API / used / remain / large / compact */
+    { "Providers" },  /* F02 */
+    { "Diagnose" },   /* F03 */
     { "前光" },
+};
+
+static const char *const PROV_NAMES[PROV_COUNT] = {
+    "grok", "claude", "codex", "kimi", "opencode", "agy"
 };
 
 /* Authority part of api_url ("http://h:8123/api/usage" -> "h:8123"), shown as
@@ -80,6 +96,29 @@ static void refresh_values(Settings *s)
                  s->work.auto_refresh_min);
     else
         snprintf(s->val_text[ROW_REFRESH], sizeof(s->val_text[0]), "%s", "关闭");
+    if (s->work.light_idle_off_min > 0)
+        snprintf(s->val_text[ROW_IDLE], sizeof(s->val_text[0]), "%d 分钟",
+                 s->work.light_idle_off_min);
+    else
+        snprintf(s->val_text[ROW_IDLE], sizeof(s->val_text[0]), "%s", "关闭");
+    {
+        const char *dm = "API";
+        if (s->work.display_mode_pref == 1)
+            dm = "used";
+        else if (s->work.display_mode_pref == 2)
+            dm = "remain";
+        else if (s->work.display_mode_pref == 3)
+            dm = "large";
+        else if (s->work.display_mode_pref == 4)
+            dm = "compact";
+        snprintf(s->val_text[ROW_DISPLAY], sizeof(s->val_text[0]), "%s", dm);
+    }
+    {
+        int n = config_providers_count(s->work.show_providers);
+        snprintf(s->val_text[ROW_PROVIDERS], sizeof(s->val_text[0]),
+                 "%d / %d", n, CONFIG_PROVIDERS_MAX);
+    }
+    snprintf(s->val_text[ROW_DIAGNOSE], sizeof(s->val_text[0]), "%s", "run");
     if (!s->light_ok) {
         snprintf(s->val_text[ROW_LIGHT], sizeof(s->val_text[0]), "%s", "--");
         snprintf(s->level_text, sizeof(s->level_text), "%s", "--");
@@ -126,7 +165,7 @@ Settings *settings_create(Ui *ui, const AppConfig *cfg)
     refresh_values(s);
 
     gap = ui_scale(ui, 10);
-    row_h = ui_scale(ui, 56);
+    row_h = ui_scale(ui, ROW_COUNT > 6 ? 42 : (ROW_COUNT > 4 ? 48 : 56));
 
     /* Top-aligned under the title bar, like a form; leftover space stays at
      * the bottom (the keypad fills its screen, this page is a short list). */
@@ -172,6 +211,37 @@ Settings *settings_create(Ui *ui, const AppConfig *cfg)
     if (y + s->back_rect.height > ui->h) { /* tiny screens: refuse, caller keeps dashboard */
         free(s);
         return NULL;
+    }
+
+    /* Providers sub-page: one row per tool + Back. */
+    {
+        int py = ui_scale(ui, 72);
+        int ph = ui_scale(ui, 44);
+        int pg = ui_scale(ui, 8);
+        int side = ui_scale(ui, 40);
+        int i;
+
+        s->prov_warn[0] = '\0';
+        for (i = 0; i < PROV_COUNT; i++) {
+            s->prov_row[i].left = (unsigned short)ui->h_padding;
+            s->prov_row[i].top = (unsigned short)py;
+            s->prov_row[i].width = (unsigned short)ui->content_w;
+            s->prov_row[i].height = (unsigned short)ph;
+            s->prov_dn[i].width = s->prov_up[i].width = (unsigned short)side;
+            s->prov_dn[i].height = s->prov_up[i].height = (unsigned short)side;
+            s->prov_up[i].top = s->prov_dn[i].top =
+                (unsigned short)(py + (ph - side) / 2);
+            s->prov_dn[i].left = (unsigned short)((int)s->prov_row[i].left +
+                                                  (int)s->prov_row[i].width -
+                                                  ui_scale(ui, 14) - side);
+            s->prov_up[i].left = (unsigned short)((int)s->prov_dn[i].left -
+                                                  ui_scale(ui, 6) - side);
+            py += ph + pg;
+        }
+        s->prov_back.left = (unsigned short)ui->h_padding;
+        s->prov_back.top = (unsigned short)(py + ui_scale(ui, 8));
+        s->prov_back.width = (unsigned short)ui->content_w;
+        s->prov_back.height = (unsigned short)ui_scale(ui, 48);
     }
     return s;
 }
@@ -407,6 +477,14 @@ SettingsHit settings_handle_tap(Settings *s, int fbfd, int x, int y)
         return SET_HIT_NONE;
     }
 
+    if (r == &s->row_rect[ROW_DISPLAY]) {
+        flash_press(s, fbfd, r);
+        s->work.display_mode_pref = (s->work.display_mode_pref + 1) % 5;
+        refresh_values(s);
+        restore_row(s, fbfd, ROW_DISPLAY);
+        return SET_HIT_NONE;
+    }
+
     if (r == &s->row_rect[ROW_LIGHT]) {
         int next;
 
@@ -440,13 +518,32 @@ SettingsHit settings_handle_tap(Settings *s, int fbfd, int x, int y)
         return SET_HIT_NONE;
     }
 
-    if (r == &s->row_rect[ROW_URL] || r == &s->row_rect[ROW_REFRESH]) {
-        int idx = (r == &s->row_rect[ROW_URL]) ? ROW_URL : ROW_REFRESH;
+    if (r == &s->row_rect[ROW_PROVIDERS]) {
+        flash_press(s, fbfd, r);
+        restore_row(s, fbfd, ROW_PROVIDERS);
+        return SET_HIT_EDIT_PROVIDERS;
+    }
 
+    if (r == &s->row_rect[ROW_DIAGNOSE]) {
+        flash_press(s, fbfd, r);
+        restore_row(s, fbfd, ROW_DIAGNOSE);
+        return SET_HIT_DIAGNOSE;
+    }
+
+    if (r == &s->row_rect[ROW_URL] || r == &s->row_rect[ROW_REFRESH] ||
+        r == &s->row_rect[ROW_IDLE]) {
+        int idx = ROW_URL;
+
+        if (r == &s->row_rect[ROW_REFRESH])
+            idx = ROW_REFRESH;
+        else if (r == &s->row_rect[ROW_IDLE])
+            idx = ROW_IDLE;
         flash_press(s, fbfd, r);
         restore_row(s, fbfd, idx);
         if (idx == ROW_URL)
             return SET_HIT_EDIT_URL;
+        if (idx == ROW_IDLE)
+            return SET_HIT_EDIT_IDLE;
         return SET_HIT_EDIT_REFRESH;
     }
     return SET_HIT_NONE;
@@ -489,6 +586,160 @@ int settings_set_refresh_min(Settings *s, int minutes)
     return changed;
 }
 
+int settings_idle_min(const Settings *s)
+{
+    return s ? s->work.light_idle_off_min : 0;
+}
+
+int settings_set_light_idle_min(Settings *s, int minutes)
+{
+    int changed;
+
+    if (!s)
+        return 0;
+    minutes = config_clamp_light_idle(minutes);
+    changed = s->work.light_idle_off_min != minutes;
+    s->work.light_idle_off_min = minutes;
+    if (changed)
+        refresh_values(s);
+    return changed;
+}
+
+const char *settings_providers(const Settings *s)
+{
+    return s ? s->work.show_providers : CONFIG_PROVIDERS_DEFAULT;
+}
+
+static int provider_enabled_in(const char *list, const char *name)
+{
+    ProviderSelection sel;
+    config_providers_to_selection(list, &sel);
+    if (strcmp(name, "grok") == 0) return sel.grok;
+    if (strcmp(name, "claude") == 0) return sel.claude;
+    if (strcmp(name, "codex") == 0) return sel.codex;
+    if (strcmp(name, "kimi") == 0) return sel.kimi;
+    if (strcmp(name, "opencode") == 0) return sel.opencode;
+    if (strcmp(name, "agy") == 0) return sel.agy;
+    return 0;
+}
+
+void settings_providers_draw(Settings *s)
+{
+    Ui *ui;
+    int i;
+
+    if (!s)
+        return;
+    ui = s->ui;
+    fbink_cls(ui->fbfd, &ui->cfg_draw, NULL, false);
+    ui_text(ui, "Providers", ui->px_card_title,
+            0, ui_scale(ui, 20), ui->w, ui_scale(ui, 28),
+            UI_ALIGN_CENTER, FG_BLACK, 0);
+    if (s->prov_warn[0]) {
+        ui_text(ui, s->prov_warn, ui->px_subtitle,
+                0, ui_scale(ui, 48), ui->w, ui_scale(ui, 20),
+                UI_ALIGN_CENTER, FG_BLACK, 0);
+    }
+    for (i = 0; i < PROV_COUNT; i++) {
+        const FBInkRect *r = &s->prov_row[i];
+        char line[64];
+        int on = provider_enabled_in(s->work.show_providers, PROV_NAMES[i]);
+        int pad = ui_scale(ui, 14);
+        int tw = 0, th = 0;
+
+        draw_frame(ui, r);
+        snprintf(line, sizeof(line), "%s  %s", PROV_NAMES[i], on ? "ON" : "off");
+        if (ui_measure(ui, line, ui->px_label, &tw, &th) == 0 && tw > 0) {
+            int ty = r->top + (r->height - th) / 2;
+            ui_text(ui, line, ui->px_label, r->left + pad, ty, tw, th,
+                    UI_ALIGN_LEFT, on ? FG_BLACK : FG_GRAY8, 0);
+        }
+        draw_step_key(s, &s->prov_up[i], "^");
+        draw_step_key(s, &s->prov_dn[i], "v");
+    }
+    draw_frame(ui, &s->prov_back);
+    {
+        const FBInkRect *r = &s->prov_back;
+        int tw = 0, th = 0, x, y;
+        if (ui_measure(ui, "返回", ui->px_percent, &tw, &th) == 0 && tw > 0) {
+            x = r->left + (r->width - tw) / 2;
+            y = r->top + (r->height - th) / 2;
+            ui_text(ui, "返回", ui->px_percent, x, y, tw, th,
+                    UI_ALIGN_LEFT, FG_BLACK, 0);
+        }
+    }
+}
+
+int settings_providers_handle_tap(Settings *s, int fbfd, int x, int y)
+{
+    int i;
+
+    if (!s)
+        return 1;
+    if (rect_has(&s->prov_back, x, y)) {
+        flash_press(s, fbfd, &s->prov_back);
+        s->prov_warn[0] = '\0';
+        return 1;
+    }
+    for (i = 0; i < PROV_COUNT; i++) {
+        if (rect_has(&s->prov_up[i], x, y)) {
+            flash_press(s, fbfd, &s->prov_up[i]);
+            (void)config_providers_move(s->work.show_providers,
+                                        sizeof(s->work.show_providers),
+                                        PROV_NAMES[i], -1);
+            refresh_values(s);
+            settings_providers_draw(s);
+            {
+                FBInkRect full;
+                full.left = 0; full.top = 0;
+                full.width = (unsigned short)s->ui->w;
+                full.height = (unsigned short)s->ui->h;
+                ui_refresh(fbfd, &full, WFM_DU);
+            }
+            return 0;
+        }
+        if (rect_has(&s->prov_dn[i], x, y)) {
+            flash_press(s, fbfd, &s->prov_dn[i]);
+            (void)config_providers_move(s->work.show_providers,
+                                        sizeof(s->work.show_providers),
+                                        PROV_NAMES[i], +1);
+            refresh_values(s);
+            settings_providers_draw(s);
+            {
+                FBInkRect full;
+                full.left = 0; full.top = 0;
+                full.width = (unsigned short)s->ui->w;
+                full.height = (unsigned short)s->ui->h;
+                ui_refresh(fbfd, &full, WFM_DU);
+            }
+            return 0;
+        }
+        if (rect_has(&s->prov_row[i], x, y)) {
+            flash_press(s, fbfd, &s->prov_row[i]);
+            if (config_providers_toggle(s->work.show_providers,
+                                        sizeof(s->work.show_providers),
+                                        PROV_NAMES[i]) != 0) {
+                snprintf(s->prov_warn, sizeof(s->prov_warn),
+                         "need >=1 provider");
+            } else {
+                s->prov_warn[0] = '\0';
+            }
+            refresh_values(s);
+            settings_providers_draw(s);
+            {
+                FBInkRect full;
+                full.left = 0; full.top = 0;
+                full.width = (unsigned short)s->ui->w;
+                full.height = (unsigned short)s->ui->h;
+                ui_refresh(fbfd, &full, WFM_DU);
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
+
 int settings_commit(Settings *s, AppConfig *cfg)
 {
     int changed;
@@ -500,8 +751,15 @@ int settings_commit(Settings *s, AppConfig *cfg)
               s->work.touch_mirror_x != s->orig.touch_mirror_x ||
               s->work.touch_mirror_y != s->orig.touch_mirror_y ||
               s->work.wifi_auto_off != s->orig.wifi_auto_off ||
-              s->work.auto_refresh_min != s->orig.auto_refresh_min;
-    if (changed)
+              s->work.auto_refresh_min != s->orig.auto_refresh_min ||
+              s->work.light_idle_off_min != s->orig.light_idle_off_min ||
+              s->work.display_mode_pref != s->orig.display_mode_pref ||
+              s->work.refresh_preset != s->orig.refresh_preset ||
+              strcmp(s->work.show_providers, s->orig.show_providers) != 0 ||
+              s->work.config_version != s->orig.config_version;
+    if (changed) {
+        s->work.config_version = CONFIG_VERSION_CURRENT;
         *cfg = s->work;
+    }
     return changed;
 }

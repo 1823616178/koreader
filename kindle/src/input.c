@@ -82,6 +82,16 @@ void input_transform(const AppConfig *cfg, int scr_w, int scr_h,
     long sx = 0;
     long sy = 0;
 
+    /* Swap raw axes (and their ranges) BEFORE scaling. Doing it after would
+     * map each axis against the wrong screen dimension on non-square panels. */
+    if (cfg->touch_swap_xy) {
+        long tmp;
+
+        tmp = raw_x; raw_x = raw_y; raw_y = tmp;
+        tmp = min_x; min_x = min_y; min_y = tmp;
+        tmp = max_x; max_x = max_y; max_y = tmp;
+    }
+
     /* Clamp raw into the reported range before scaling, so a garbage
      * coordinate cannot overflow the multiply below (and lands on an edge). */
     if (raw_x < min_x)
@@ -99,11 +109,6 @@ void input_transform(const AppConfig *cfg, int scr_w, int scr_h,
     if (max_y > min_y)
         sy = (raw_y - min_y) * (scr_h - 1) / (max_y - min_y);
 
-    if (cfg->touch_swap_xy) {
-        long tmp = sx;
-        sx = sy;
-        sy = tmp;
-    }
     if (cfg->touch_mirror_x)
         sx = scr_w - 1 - sx;
     if (cfg->touch_mirror_y)

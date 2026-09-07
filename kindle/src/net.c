@@ -83,11 +83,18 @@ void net_release_wifi(void)
 
     if (!g_wifi_we_enabled)
         return; /* nothing raised by us: a pre-existing connection stays up */
-    g_wifi_we_enabled = 0; /* clear first: release stays idempotent even if lipc fails */
-    g_wifi_state = 0;      /* we just asked for the radio to go down */
+    /* Keep ownership until the disable command is issued successfully so a
+     * failed release can be retried and "刷新后关 WiFi" still works. */
     wd_expect(NET_CMD_S);
     rc = system("lipc-set-prop -i com.lab126.cmd wirelessEnable 0 2>/dev/null");
-    (void)rc;
+    if (rc != 0) {
+        /* Command failed (or lipc missing). Leave ownership set; display
+         * state stays whatever the last probe said -- do not pretend the
+         * radio is down. */
+        return;
+    }
+    g_wifi_we_enabled = 0;
+    g_wifi_state = 0;
 }
 
 int net_ensure_wifi(void)
@@ -97,8 +104,12 @@ int net_ensure_wifi(void)
     int state = wifi_probe(); /* arms the watchdog itself */
 
     if (state == 1) {
-        g_wifi_we_enabled = 0; /* was already up before we got here: not ours */
-        return 0;
+        /* Already CONNECTED: only clear ownership when we did not raise it
+         * earlier in this session. Clearing here after our own enable made
+         * the next release a no-op (R04). */
+        if (!g_wifi_we_enabled)
+            return 0; /* pre-existing connection: not ours, leave it alone */
+        return 0;     /* still ours from a prior ensure in this session */
     }
     if (state < 0)
         empty_streak = 1;
@@ -424,4 +435,16 @@ void net_hold_screensaver(void)
 
     wd_expect(NET_CMD_S); /* system() has no timeout of its own */
     (void)system("lipc-set-prop -i com.lab126.powerd preventScreenSaver 1 2>/dev/null");
+}
+
+/* Test seam: whether this session still owes a wirelessEnable 0. */
+int net_wifi_owned_for_test(void)
+{
+    return g_wifi_we_enabled ? 1 : 0;
+}
+
+/* Test seam: force the ownership flag (host tests have no lipc). */
+void net_wifi_set_owned_for_test(int owned)
+{
+    g_wifi_we_enabled = owned ? 1 : 0;
 }

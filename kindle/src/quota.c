@@ -262,3 +262,116 @@ void quota_format_timestamp(char *buf, size_t n, int has_value, long long ms)
     if (!lt || strftime(buf, n, "%m-%d %H:%M:%S", lt) == 0)
         snprintf(buf, n, "%s", "--");
 }
+
+void quota_format_timestamp_min(char *buf, size_t n, int has_value, long long ms)
+{
+    time_t t;
+    struct tm *lt;
+
+    if (!has_value) {
+        snprintf(buf, n, "%s", "--");
+        return;
+    }
+    t = (time_t)floor_s(ms);
+    lt = localtime(&t);
+    /* Minute floor: same text for any second within the minute, so a fetch
+     * that only bumps generatedAt by milliseconds does not dirty the panel. */
+    if (!lt || strftime(buf, n, "%m-%d %H:%M", lt) == 0)
+        snprintf(buf, n, "%s", "--");
+}
+
+static unsigned long long fnv1a_add(unsigned long long h, const char *s)
+{
+    if (!s)
+        return h;
+    while (*s) {
+        h ^= (unsigned char)*s++;
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+static unsigned long long fnv1a_add_win(unsigned long long h, const QuotaWindow *w,
+                                       const char *mode, long long now_ms)
+{
+    char pct[16];
+    char reset[48];
+
+    if (!w || !w->valid) {
+        return fnv1a_add(h, "--");
+    }
+    quota_format_percent(pct, sizeof(pct), quota_display_value(w, mode));
+    h = fnv1a_add(h, pct);
+    h ^= (unsigned long long)(w->rate_limited ? 1 : 0);
+    h *= 0x100000001b3ULL;
+    quota_format_reset(reset, sizeof(reset), w, now_ms);
+    return fnv1a_add(h, reset);
+}
+
+static unsigned long long fnv1a_add_provider(unsigned long long h,
+                                            const ProviderQuota *pq,
+                                            const char *mode, int with_monthly,
+                                            long long now_ms)
+{
+    char ts[24];
+
+    if (!pq)
+        return h;
+    h = fnv1a_add_win(h, &pq->five, mode, now_ms);
+    h = fnv1a_add_win(h, &pq->seven, mode, now_ms);
+    if (with_monthly)
+        h = fnv1a_add_win(h, &pq->monthly, mode, now_ms);
+    quota_format_timestamp_min(ts, sizeof(ts), pq->has_fetched_at, pq->fetched_at);
+    return fnv1a_add(h, ts);
+}
+
+unsigned long long quota_display_sig(const QuotaSnapshot *snap,
+                                    const char *status, const char *detail)
+{
+    unsigned long long h = 0xcbf29ce484222325ULL;
+    char ts[24];
+    char pct[16];
+    long long now_ms;
+    const char *mode;
+
+    if (!snap)
+        return fnv1a_add(fnv1a_add(h, status), detail);
+
+    now_ms = (long long)time(NULL) * 1000LL;
+    mode = snap->display_mode;
+    h = fnv1a_add(h, status);
+    h = fnv1a_add(h, detail);
+    h = fnv1a_add(h, mode);
+    quota_format_percent(pct, sizeof(pct), snap->alert_percent);
+    h = fnv1a_add(h, pct);
+    quota_format_timestamp_min(ts, sizeof(ts), snap->has_generated_at,
+                               snap->generated_at);
+    h = fnv1a_add(h, ts);
+
+    h ^= (unsigned long long)(snap->providers.grok & 1);
+    h ^= (unsigned long long)(snap->providers.claude & 1) << 1;
+    h ^= (unsigned long long)(snap->providers.codex & 1) << 2;
+    h ^= (unsigned long long)(snap->providers.kimi & 1) << 3;
+    h ^= (unsigned long long)(snap->providers.opencode & 1) << 4;
+    h ^= (unsigned long long)(snap->providers.agy & 1) << 5;
+    h *= 0x100000001b3ULL;
+
+    if (snap->providers.grok)
+        h = fnv1a_add_provider(h, &snap->grok, mode, 1, now_ms);
+    if (snap->providers.claude)
+        h = fnv1a_add_provider(h, &snap->claude, mode, 0, now_ms);
+    if (snap->providers.codex)
+        h = fnv1a_add_provider(h, &snap->codex, mode, 0, now_ms);
+    if (snap->providers.kimi)
+        h = fnv1a_add_provider(h, &snap->kimi, mode, 0, now_ms);
+    if (snap->providers.opencode)
+        h = fnv1a_add_provider(h, &snap->opencode, mode, 1, now_ms);
+    if (snap->providers.agy) {
+        quota_format_timestamp_min(ts, sizeof(ts), snap->agy.has_fetched_at,
+                                   snap->agy.fetched_at);
+        h = fnv1a_add(h, ts);
+        h = fnv1a_add_provider(h, &snap->agy.gemini, mode, 1, now_ms);
+        h = fnv1a_add_provider(h, &snap->agy.third_party, mode, 1, now_ms);
+    }
+    return h;
+}

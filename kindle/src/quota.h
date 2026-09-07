@@ -52,5 +52,11 @@ double quota_clamp(double v);
 void quota_format_percent(char *buf, size_t n, double value);
 void quota_format_reset(char *buf, size_t n, const QuotaWindow *w, long long now_ms);
 void quota_format_timestamp(char *buf, size_t n, int has_value, long long ms);
+/* Minute-granularity timestamp for on-panel text + skip-redraw sig. */
+void quota_format_timestamp_min(char *buf, size_t n, int has_value, long long ms);
+/* FNV of fields that actually paint: quotas, alerts, mode, selection,
+ * status/detail, and timestamps floored to the displayed minute. */
+unsigned long long quota_display_sig(const QuotaSnapshot *snap,
+                                    const char *status, const char *detail);
 
 #endif

@@ -230,7 +230,14 @@ touch_mirror_y=0
 
 重新跑 `./tools/build.sh`，然后按 §3 覆盖 `extensions/aiquota/` 即可。
 
-**注意保留你的 `config`**：升级包里的 `config` 是默认值，直接覆盖会把 `api_url` 和触摸标定冲掉。安全做法是先备份，或者只覆盖 `bin/` 目录。
+**注意保留你的 `config`**：升级包里的 `config` 是默认值，直接覆盖会把 `api_url`、触摸标定和本机 `show_providers` 冲掉。安全做法是先备份，或者只覆盖 `bin/`（以及字体）目录。
+
+应用启动时会：
+
+1. 若主配置不可读，尝试从同目录 `config.bak`（上次可靠保存留下的备份）恢复并写回主文件。
+2. 按 `config_version` 做字段迁移（例如补齐 `show_providers`），迁移后会自动保存。
+
+因此升级二进制时只要**不要覆盖用户的 `config`**，接口地址、触摸标定与提供商筛选都会保留。
 
 ---
 

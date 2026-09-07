@@ -2,18 +2,23 @@
 # Launcher (bin/aiquota.sh) simulation on WSL: stubs every on-device command and
 # path so the freeze/restore sequence and its traps can be exercised off-Kindle.
 # Covers the guarantee the whole design rests on -- however the app goes away,
-# restore_framework runs exactly once.
+# restore_framework runs exactly once -- plus session lock / watchdog handshake.
 set -u
 T=/tmp/wrtest
 SRC=$(CDPATH= cd -- "$(dirname -- "$0")/../extension/bin" && pwd)
-rm -rf "$T"; mkdir -p "$T/bin"
+rm -rf "$T"; mkdir -p "$T/bin" "$T/tmp"
 
 cp "$SRC/aiquota.sh" "$SRC/restore.sh" "$T/bin/"
-# wake_lock/wake_unlock become appends (not the device's truncating writes) so
-# the sandbox file line count records exactly how often each was grabbed/
-# released; a plain ">" would hide a double-grab behind the truncation.
-sed -i "s#^BIN=.*#BIN=$T/bin#; s#/var/tmp/aiquota-fb.dump#$T/fb.dump#g; s#/var/tmp/aiquota.ping#$T/ping#g; s#/dev/fb0#$T/fb0#g; s#> /sys/power/wake_lock#>> $T/wake_lock#" "$T/bin/aiquota.sh"
-sed -i "s#^AIQUOTA_FB_DUMP=.*#AIQUOTA_FB_DUMP=$T/fb.dump#; s#/dev/fb0#$T/fb0#; s#> /sys/power/wake_unlock#>> $T/wake_unlock#" "$T/bin/restore.sh"
+# Point every absolute /var/tmp and device path into the sandbox. wake_lock
+# appends (not truncates) so line counts record grabs/releases.
+sed -i "s#^BIN=.*#BIN=$T/bin#" "$T/bin/aiquota.sh"
+sed -i "s#/dev/fb0#$T/fb0#g; s#> /sys/power/wake_lock#>> $T/wake_lock#" "$T/bin/aiquota.sh"
+sed -i "s#/dev/fb0#$T/fb0#g; s#> /sys/power/wake_unlock#>> $T/wake_unlock#" "$T/bin/restore.sh"
+# Force session paths into $T/tmp via the public override.
+export AIQUOTA_TMP="$T/tmp"
+export AIQUOTA_LOCK="$T/tmp/aiquota.lock"
+export AIQUOTA_ACTIVE="$T/tmp/aiquota.active"
+
 echo LIVE-SCREEN > "$T/fb0"
 
 for c in killall lipc-set-prop usleep; do
@@ -23,9 +28,14 @@ done
 sleep 300 & cvm=$!
 kill -STOP $cvm
 printf '#!/bin/sh\n[ "$1" = cvm ] && echo %s\nexit 0\n' "$cvm" > "$T/bin/pidof"
-# The watchdog has its own suite (watchdog_sim.sh); here it only needs to be
-# observably launched.
-printf '#!/bin/sh\necho "watchdog started $1" >> %s/log\n' "$T" > "$T/bin/watchdog.sh"
+# Fake watchdog: honour the ready handshake the launcher waits on, then exit.
+cat > "$T/bin/watchdog.sh" <<WD
+#!/bin/sh
+echo "watchdog started \$1" >> $T/log
+sid=\${2:-\$1}
+: > "\$AIQUOTA_TMP/aiquota.\${sid}.wdready"
+exit 0
+WD
 chmod +x "$T"/bin/killall "$T"/bin/lipc-set-prop "$T"/bin/usleep "$T"/bin/pidof "$T"/bin/watchdog.sh
 export PATH="$T/bin:$PATH"
 
@@ -40,6 +50,9 @@ wlines() { if [ -f "$T/$1" ]; then wc -l < "$T/$1"; else echo 0; fi; }
 setup_app() {
     : > "$T/log"
     echo LIVE-SCREEN > "$T/fb0"
+    rm -f "$T/wake_lock" "$T/wake_unlock"
+    rm -rf "$T/tmp"
+    mkdir -p "$T/tmp"
     printf '#!/bin/sh\necho "app started" >> %s/log\necho APP-SCREEN > %s/fb0\n%s\n' \
         "$T" "$T" "$1" > "$T/bin/aiquota"
     chmod +x "$T/bin/aiquota"
@@ -59,6 +72,8 @@ ok 1 "$(repainted)" "A: saved screen repainted"
 ok 1 "$(wlines wake_lock)" "A: wake_lock grabbed exactly once"
 ok aiquota "$(cat "$T/wake_lock" 2>/dev/null)" "A: wake_lock held by aiquota"
 ok 1 "$(wlines wake_unlock)" "A: wake_unlock released exactly once"
+ok 0 "$([ -d "$T/tmp/aiquota.lock" ] && echo 1 || echo 0)" "A: lock released on exit"
+ok 0 "$([ -f "$T/tmp/aiquota.active" ] && echo 1 || echo 0)" "A: active session cleared"
 
 # --- Test B: app crashes (the SIGSEGV path, seen from the wrapper)
 setup_app 'kill -SEGV $$'
@@ -104,6 +119,34 @@ mv "$T/bin/restore.sh.off" "$T/bin/restore.sh"
 ok 1 "$([ $rc -ne 0 ] && echo 1 || echo 0)" "F: aborts when restore.sh is unavailable"
 ok 0 "$(cnt 'killall -STOP')" "F: nothing was frozen"
 ok 0 "$(cnt 'app started')" "F: app never launched"
+
+# --- Test G: second launch while first holds the lock is refused
+setup_app 'sleep 5'
+sh "$T/bin/aiquota.sh" & w=$!
+sleep 1
+: > "$T/log2"
+# Capture second launch separately
+AIQUOTA_TMP="$T/tmp" AIQUOTA_LOCK="$T/tmp/aiquota.lock" AIQUOTA_ACTIVE="$T/tmp/aiquota.active" \
+    sh "$T/bin/aiquota.sh" >"$T/log2" 2>&1
+rc2=$?
+ok 1 "$([ $rc2 -ne 0 ] && echo 1 || echo 0)" "G: duplicate launch refused"
+ok 1 "$(grep -c 'already running' "$T/log2")" "G: duplicate reports already running"
+wait $w 2>/dev/null
+
+# --- Test H: watchdog ready failure aborts before freeze
+setup_app 'exit 0'
+cat > "$T/bin/watchdog.sh" <<WD
+#!/bin/sh
+echo "watchdog started \$1" >> $T/log
+# never write wdready
+exit 0
+WD
+chmod +x "$T/bin/watchdog.sh"
+sh "$T/bin/aiquota.sh" 2>/dev/null
+rc=$?
+ok 1 "$([ $rc -ne 0 ] && echo 1 || echo 0)" "H: aborts when watchdog never ready"
+ok 0 "$(cnt 'killall -STOP')" "H: nothing frozen without watchdog"
+ok 0 "$(cnt 'app started')" "H: app never launched without watchdog"
 
 kill -9 $cvm 2>/dev/null; wait $cvm 2>/dev/null
 rm -rf "$T"
