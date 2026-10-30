@@ -23,8 +23,8 @@ display_mode_pref=0
 refresh_preset=0
 
 # F02: local ordered provider visibility. Request uses ?providers=...
-# Does NOT call PUT /api/providers. Default = all tools.
-show_providers=grok,claude,codex,kimi,opencode,agy
+# Does NOT call PUT /api/providers. Default = all supported tools.
+show_providers=grok,codex,kimi,agy
 
 # F07 config schema version
 config_version=2

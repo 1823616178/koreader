@@ -34,7 +34,6 @@ local sample = {
     displayMode = "used",
     alertPercent = 85,
     generatedAt = os.time() * 1000,
-    claude = { five = window(18, 4), seven = window(42, 96) },
     codex = { five = window(12, 3), seven = window(34, 120) },
     kimi = { five = window(2.4, 2), seven = window(25, 72) },
     agy = {
@@ -43,17 +42,24 @@ local sample = {
     },
 }
 
--- Exercise the actual HTTP sink, JSON decoder and response normalizer without
--- depending on the LAN service during a deterministic smoke test.
+-- Exercise URL normalization, provider filtering, the actual HTTP sink, JSON
+-- decoder and response normalizer without depending on the LAN service.
+QuotaData.settings = {
+    readSetting = function()
+        return "http://example.test/base/?foo=1&providers=claude"
+    end,
+}
 local real_http_request = http.request
 http.request = function(request)
+    assert(request.url == "http://example.test/base/api/usage?foo=1&providers=codex,kimi,agy")
+    assert(not request.url:find("opencode", 1, true))
     request.sink(rapidjson.encode(sample))
     request.sink(nil)
     return 1, 200, { ["content-type"] = "application/json" }, "OK"
 end
 local parsed = assert(QuotaData:fetch())
 http.request = real_http_request
-assert(parsed.claude.five.used == 18)
+assert(parsed.codex.five.used == 12)
 assert(parsed.agy.thirdParty.seven == nil)
 assert(QuotaData.displayValue({ used = 0 }, "used") == 0)
 assert(QuotaData.displayValue({ used = 18 }, "remaining") == 82)

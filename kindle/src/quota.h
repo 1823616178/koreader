@@ -8,7 +8,7 @@ typedef struct {
     double used;          /* clamped 0..100, always "used percent" semantics */
     int has_reset_at;
     long long reset_at;   /* unix epoch ms */
-    int rate_limited;     /* status == "rate-limited" (currently OpenCode only) */
+    int rate_limited;     /* status == "rate-limited" */
 } QuotaWindow;
 
 typedef struct {
@@ -16,15 +16,13 @@ typedef struct {
     long long fetched_at; /* unix epoch ms */
     QuotaWindow five;
     QuotaWindow seven;
-    QuotaWindow monthly;  /* Grok/OpenCode; invalid for providers without it */
+    QuotaWindow monthly;  /* Grok; invalid for providers without it */
 } ProviderQuota;
 
 typedef struct {
     int grok;
-    int claude;
     int codex;
     int kimi;
-    int opencode;
     int agy;
 } ProviderSelection;
 
@@ -34,7 +32,7 @@ typedef struct {
     int has_generated_at;
     long long generated_at;       /* unix epoch ms */
     ProviderSelection providers;  /* response selection; disabled cards stay hidden */
-    ProviderQuota grok, claude, codex, kimi, opencode;
+    ProviderQuota grok, codex, kimi;
     struct {
         int has_fetched_at;
         long long fetched_at;

@@ -59,10 +59,8 @@ static const char DEMO_JSON[] =
     "  \"generatedAt\": 1785695952333,\n"
     "  \"providers\": {\n"
     "    \"grok\": true,\n"
-    "    \"claude\": true,\n"
     "    \"codex\": true,\n"
     "    \"kimi\": true,\n"
-    "    \"opencode\": true,\n"
     "    \"agy\": true\n"
     "  },\n"
     "  \"grok\": {\n"
@@ -70,11 +68,6 @@ static const char DEMO_JSON[] =
     "    \"five\": null,\n"
     "    \"seven\": { \"used\": 8, \"resetAt\": 1788408060000 },\n"
     "    \"monthly\": null\n"
-    "  },\n"
-    "  \"claude\": {\n"
-    "    \"fetchedAt\": 1785695900000,\n"
-    "    \"five\": { \"used\": 18, \"resetAt\": 1785712676000 },\n"
-    "    \"seven\": { \"used\": 42, \"resetAt\": 1786300383000 }\n"
     "  },\n"
     "  \"codex\": {\n"
     "    \"fetchedAt\": 1785695910000,\n"
@@ -85,14 +78,6 @@ static const char DEMO_JSON[] =
     "    \"fetchedAt\": 1785695950844,\n"
     "    \"five\": { \"used\": 2, \"resetAt\": 1785709259452 },\n"
     "    \"seven\": { \"used\": 25, \"resetAt\": 1786000859452 }\n"
-    "  },\n"
-    "  \"opencode\": {\n"
-    "    \"fetchedAt\": 1785695951200,\n"
-    "    \"rolling\": { \"used\": 1, \"resetAt\": 1785712676000, \"status\": \"ok\" },\n"
-    "    \"weekly\": { \"used\": 46, \"resetAt\": 1786000859452, \"status\": \"ok\" },\n"
-    "    \"monthly\": { \"used\": 23, \"resetAt\": 1788134400000, \"status\": \"ok\" },\n"
-    "    \"five\": { \"used\": 1, \"resetAt\": 1785712676000, \"status\": \"ok\" },\n"
-    "    \"seven\": { \"used\": 46, \"resetAt\": 1786000859452, \"status\": \"ok\" }\n"
     "  },\n"
     "  \"agy\": {\n"
     "    \"fetchedAt\": 1785695952333,\n"
@@ -1077,6 +1062,8 @@ int main(int argc, char **argv)
                     diag_finish(0, wifi_ms, 0, 0);
                     st = ST_ERROR;
                     snprintf(detail, sizeof(detail), "WiFi 未连接");
+                    if (cfg.wifi_auto_off)
+                        net_release_wifi();
                     paint_current_dashboard(fbfd, ui, &snap, host, st, detail,
                                             cfg.auto_refresh_min, WFM_GC16);
                 } else if (pthread_create(&tid, NULL, fetch_job_main, &job) != 0) {
@@ -1383,6 +1370,8 @@ handle_action:
                         long wifi_ms = mono_now_ms() - tw0;
                         if (wrc != 0) {
                             diag_finish(0, wifi_ms, 0, 0);
+                            if (cfg.wifi_auto_off)
+                                net_release_wifi();
                         } else if (pthread_create(&dtid, NULL, fetch_job_main,
                                                   &djob) != 0) {
                             int stcode = 0;

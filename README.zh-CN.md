@@ -2,9 +2,9 @@
 
 *[English](README.md)*
 
-一个紧凑的 KOReader 全屏面板，通过 Usage API 同时显示 Claude Code、Codex、Kimi Code 和 Antigravity（Gemini、Claude/GPT）的 5 小时与周额度。
+一个紧凑的 KOReader 全屏面板，通过 Usage API 同时显示 Codex、Kimi Code 和 Antigravity（Gemini、Claude/GPT）的 5 小时与周额度。
 
-面板使用三行两列布局，五个额度卡片和一个接口状态卡片会完整显示在同一页，不需要滚动或翻页。每个额度窗口包含百分比、分段进度条和预计重置时间；达到接口返回的 `alertPercent` 时会显示 `!`。
+四个额度卡片按两行两列排列，接口状态卡片占底部整行，所有内容完整显示在同一页，不需要滚动或翻页。每个额度窗口包含百分比、分段进度条和预计重置时间；达到接口返回的 `alertPercent` 时会显示 `!`。
 
 ![](preview-partial.png)
 
@@ -13,10 +13,10 @@
 默认请求：
 
 ```text
-http://123.161.179.32:46927/api/usage
+http://123.161.179.32:46927/api/usage?providers=codex,kimi,agy
 ```
 
-页面首次打开后自动加载。底部按钮可以刷新数据、修改接口地址或关闭面板。地址输入框既接受主机地址（例如 `http://123.161.179.32:46927`），也接受完整的 `/api/usage` 地址。
+页面首次打开后自动加载。底部按钮可以刷新数据、修改接口地址或关闭面板。地址输入框既接受主机地址（例如 `http://123.161.179.32:46927`），也接受完整的 `/api/usage` 地址；每次请求都会使用固定的 provider 筛选名单。
 
 插件遵循 `usage-api.md` 的字段约定：
 

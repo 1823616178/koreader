@@ -2,7 +2,7 @@
 
 ## 1. 项目简介
 
-这是 AI Credits Usage API 的 Kindle 原生 C 客户端：不依赖 KOReader，用 FBInk 直接写 framebuffer 渲染 Grok、Claude Code、Codex、Kimi Code、OpenCode Go 和 Antigravity 额度，提供 KUAL 菜单与书库 Scriptlet 双入口。完整的设计依据、技术选型和风险分析见仓库根目录的 [`kindle-port.zh-CN.md`](../kindle-port.zh-CN.md)。
+这是 AI Credits Usage API 的 Kindle 原生 C 客户端：不依赖 KOReader，用 FBInk 直接写 framebuffer 渲染 Grok、Codex、Kimi Code 和 Antigravity 额度，提供 KUAL 菜单与书库 Scriptlet 双入口。完整的设计依据、技术选型和风险分析见仓库根目录的 [`kindle-port.zh-CN.md`](../kindle-port.zh-CN.md)。
 
 目标设备：Kindle，固件 5.16.2.1.1（softfloat ABI），已越狱。
 
@@ -97,7 +97,7 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 | 自动刷新 | 关闭 / N 分钟 | 弹键盘输入，0=关闭、1–60 分钟。到点自动开 WiFi 拉一次再关 |
 | Idle light | 关闭 / N 分钟 | 闲置熄灯分钟数；0=关闭该功能 |
 | Display | API / used / remain / large / compact | 循环切换本机显示偏好（large/compact 已存键，布局仍为常规卡片） |
-| Providers | N / 6 | 进入子页：逐个 ON/off，`^`/`v` 调整顺序；至少保留 1 个。请求带 `?providers=`，**不**调用 `PUT /api/providers` |
+| Providers | N / 4 | 进入子页：逐个 ON/off，`^`/`v` 调整顺序；至少保留 1 个。请求带 `?providers=`，**不**调用 `PUT /api/providers` |
 | Diagnose | run | 可取消的连接探测；多行展示 WiFi/DNS/connect/HTTP/JSON 阶段；失败不覆盖上次成功额度 |
 | 前光 | 开 / 关 · N | 一行合并：**左半边**点按切换开关——关掉记住档位、再开恢复（与仪表盘闲置熄灯共用记忆档位）；**右侧** `−` / `+` 步进档位，每点一档立刻发给 powerd、DU 局部刷新不闪页。减到 0 即关灯，关着时按 `+` 从记忆档位打开。范围 0–`flMaxIntensity`（常见 24 或 25） |
 
@@ -118,7 +118,7 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 | `light_idle_off_min` | 闲置熄灯分钟数；0=关闭；默认 3 |
 | `display_mode_pref` | 0=API，1=used，2=remain，3=large，4=compact |
 | `refresh_preset` | 0=custom，1=manual，2=normal(5 分钟)，3=night(30 分钟)；助手函数可映射，设置页仍以分钟输入为主 |
-| `show_providers` | 本机有序名单，如 `grok,claude,agy`；拉额度时合并为 `?providers=`，不改服务端全局采集名单 |
+| `show_providers` | 本机有序名单，如 `grok,codex,agy`；拉额度时合并为 `?providers=`，不改服务端全局采集名单 |
 | `config_version` | 配置架构版本；启动时旧版本会迁移 |
 
 旧版本配置文件里的 `idle_timeout_s` 行会被当作未知键忽略，下次从设置页保存配置时自动删除。
@@ -130,7 +130,7 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 三个开关都在 SSH 里直接跑二进制使用（`/mnt/us/extensions/aiquota/bin/aiquota --xxx`）：
 
 - `--dump-state` —— 打印 `fbink_get_state()` 的全部字段（分辨率、DPI、旋转、bpp 等），末尾附 `battery_level=` / `battery_charging=`（sysfs 多路径，失败则问 powerd；-1 表示该设备读不到，界面上也就不显示电量）以及 `frontlight_intensity=` / `frontlight_max=`（powerd lipc；-1 表示读不到）。用来核对设备实际参数。
-- `--demo` —— 用内置的示例 JSON（[`docs/superpowers/plans/usage-api.md`](../docs/superpowers/plans/usage-api.md) 里的完整示例）渲染界面，不联网，用来验证 8 张卡片、月额度、布局和字体。
+- `--demo` —— 用内置的示例 JSON（[`docs/superpowers/plans/usage-api.md`](../docs/superpowers/plans/usage-api.md) 里的完整示例）渲染界面，不联网，用来验证 6 张卡片、月额度、布局和字体。
 - `--calibrate` —— 触摸标定。按提示依次点屏幕四角，程序根据落点推导坐标变换，最后直接输出建议的配置行：
 
 ```
@@ -151,7 +151,7 @@ touch_mirror_y=0
 1. **二进制验证**：WSL 里 `file kindle/extension/bin/aiquota` 应输出 `ARM ... EABI5 ... soft-float`；`readelf -d` 的 NEEDED 里不应出现 libfbink（`tools/build.sh` 已自动校验这两项）。
 2. **dump-state**：SSH 里跑 `aiquota --dump-state`，输出的分辨率 / 旋转应与设备实际一致；`battery_level` 应为 0–100 的真实电量（插 USB 时 `battery_charging=1`）。
 3. **calibrate**：SSH 里跑 `aiquota --calibrate`，依次点四角，确认十字线落点准确；把输出的三行建议参数写进 `config`。
-4. **demo 检查**：SSH 里跑 `aiquota --demo`，确认 4×2 卡片全部在屏内、底部按钮可见，标题栏右上角五格电池条正常（充电时左侧带「充电」、未充电且 0 格时反显）；点任意卡片弹出放大框、再点任意位置关闭，底下仪表盘应逐像素还原；Grok / OpenCode 的月额度和其他提供商的采集时间正常显示；再改 demo JSON 造出「某提供商为 null」「超过 alertPercent」和 OpenCode `rate-limited` 三种情况，确认「暂无数据」、`!` 和「已限流」都对。
+4. **demo 检查**：SSH 里跑 `aiquota --demo`，确认 3×2 卡片全部在屏内、底部按钮可见，标题栏右上角五格电池条正常（充电时左侧带「充电」、未充电且 0 格时反显）；点任意卡片弹出放大框、再点任意位置关闭，底下仪表盘应逐像素还原；Grok 的月额度和其他提供商的采集时间正常显示；再改 demo JSON 造出「某提供商为 null」「超过 alertPercent」和窗口 `rate-limited` 三种情况，确认「暂无数据」、`!` 和「已限流」都对。
 5. **真实拉取与错误路径**：配好真实 `api_url` 跑一次联网拉取；再把 URL 改成不可达地址，确认界面走错误卡片而不是崩溃。
 6. **KUAL 入口完整交互**：从 KUAL 启动 → 完成「改地址 → 刷新 → 关闭」一轮 → **确认 framework 完全恢复**（能翻书、能进设置、能息屏唤醒）。这是整个移植的关键验收点。
 7. **书库 Scriptlet 入口**：从书库图标启动，重复第 6 步。
@@ -194,4 +194,4 @@ bash kindle/tests/watchdog_sim.sh   # 看门狗：心跳超时、杀不掉后的
 
 ## 10. 与 KOReader 插件的关系
 
-KOReader 原版插件原样保留在仓库根目录的 `readingquota.koplugin/`，继续维护、不受影响。Kindle 端当前以 [`docs/superpowers/plans/usage-api.md`](../docs/superpowers/plans/usage-api.md) 为接口契约，并兼容 OpenCode 的 `five` / `seven` 别名；接口后续增加字段时，解析器会忽略未知键。
+KOReader 原版插件保留在仓库根目录的 `readingquota.koplugin/`。Kindle 端当前以 [`docs/superpowers/plans/usage-api.md`](../docs/superpowers/plans/usage-api.md) 为接口契约；接口后续增加字段时，解析器会忽略未知键。

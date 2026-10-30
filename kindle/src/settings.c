@@ -59,7 +59,7 @@ static const struct {
 };
 
 static const char *const PROV_NAMES[PROV_COUNT] = {
-    "grok", "claude", "codex", "kimi", "opencode", "agy"
+    "grok", "codex", "kimi", "agy"
 };
 
 /* Authority part of api_url ("http://h:8123/api/usage" -> "h:8123"), shown as
@@ -624,10 +624,8 @@ static int provider_enabled_in(const char *list, const char *name)
     ProviderSelection sel;
     config_providers_to_selection(list, &sel);
     if (strcmp(name, "grok") == 0) return sel.grok;
-    if (strcmp(name, "claude") == 0) return sel.claude;
     if (strcmp(name, "codex") == 0) return sel.codex;
     if (strcmp(name, "kimi") == 0) return sel.kimi;
-    if (strcmp(name, "opencode") == 0) return sel.opencode;
     if (strcmp(name, "agy") == 0) return sel.agy;
     return 0;
 }

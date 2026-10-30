@@ -11,12 +11,12 @@ source never hides the other providers.
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
 local http = require("socket.http")
-local ltn12 = require("ltn12")
 local rapidjson = require("rapidjson")
 local socketutil = require("socketutil")
 
 local SETTINGS_PATH = DataStorage:getSettingsDir() .. "/readingquota.lua"
 local DEFAULT_API_BASE = "http://123.161.179.32:46927"
+local PROVIDER_QUERY = "providers=codex,kimi,agy"
 
 local QuotaData = {}
 
@@ -54,11 +54,34 @@ local function normalizeUrl(value)
     if not value:match("^https?://") then
         value = "http://" .. value
     end
+    local query = ""
+    local query_start = value:find("?", 1, true)
+    if query_start then
+        query = value:sub(query_start)
+        value = value:sub(1, query_start - 1)
+    end
     value = value:gsub("/+$", "")
     if not value:match("/api/usage$") then
         value = value .. "/api/usage"
     end
-    return value
+    return value .. query
+end
+
+local function withProviderFilter(url)
+    local base, query = url:match("^([^?]+)%?(.*)$")
+    if not base then
+        return url .. "?" .. PROVIDER_QUERY
+    end
+    local parts = {}
+    for item in (query .. "&"):gmatch("(.-)&") do
+        local key = item:match("^([^=]+)")
+        if item ~= "" and key ~= "providers" and key ~= "tools"
+            and key ~= "tool" and key ~= "provider" then
+            table.insert(parts, item)
+        end
+    end
+    table.insert(parts, PROVIDER_QUERY)
+    return base .. "?" .. table.concat(parts, "&")
 end
 
 function QuotaData:getSettings()
@@ -69,7 +92,8 @@ function QuotaData:getSettings()
 end
 
 function QuotaData:getApiUrl()
-    return normalizeUrl(self:getSettings():readSetting("usage_api_url", DEFAULT_API_BASE))
+    return withProviderFilter(normalizeUrl(
+        self:getSettings():readSetting("usage_api_url", DEFAULT_API_BASE)))
 end
 
 function QuotaData:setApiUrl(value)
@@ -118,7 +142,6 @@ function QuotaData:fetch()
         displayMode = decoded.displayMode == "remaining" and "remaining" or "used",
         alertPercent = type(decoded.alertPercent) == "number" and clamp(decoded.alertPercent) or 85,
         generatedAt = type(decoded.generatedAt) == "number" and decoded.generatedAt or nil,
-        claude = providerWindows(decoded.claude),
         codex = providerWindows(decoded.codex),
         kimi = providerWindows(decoded.kimi),
         agy = {
@@ -134,7 +157,6 @@ function QuotaData.emptySnapshot()
         displayMode = "used",
         alertPercent = 85,
         generatedAt = nil,
-        claude = empty,
         codex = empty,
         kimi = empty,
         agy = {

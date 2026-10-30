@@ -89,10 +89,8 @@ static const char *EXAMPLE_JSON =
     "  \"generatedAt\": 1785695952333,\n"
     "  \"providers\": {\n"
     "    \"grok\": true,\n"
-    "    \"claude\": true,\n"
     "    \"codex\": true,\n"
     "    \"kimi\": true,\n"
-    "    \"opencode\": true,\n"
     "    \"agy\": true\n"
     "  },\n"
     "  \"grok\": {\n"
@@ -100,11 +98,6 @@ static const char *EXAMPLE_JSON =
     "    \"five\": null,\n"
     "    \"seven\": { \"used\": 8, \"resetAt\": 1788408060000 },\n"
     "    \"monthly\": null\n"
-    "  },\n"
-    "  \"claude\": {\n"
-    "    \"fetchedAt\": 1785695900000,\n"
-    "    \"five\": { \"used\": 18, \"resetAt\": 1785712676000 },\n"
-    "    \"seven\": { \"used\": 42, \"resetAt\": 1786300383000 }\n"
     "  },\n"
     "  \"codex\": {\n"
     "    \"fetchedAt\": 1785695910000,\n"
@@ -115,14 +108,6 @@ static const char *EXAMPLE_JSON =
     "    \"fetchedAt\": 1785695950844,\n"
     "    \"five\": { \"used\": 2, \"resetAt\": 1785709259452 },\n"
     "    \"seven\": { \"used\": 25, \"resetAt\": 1786000859452 }\n"
-    "  },\n"
-    "  \"opencode\": {\n"
-    "    \"fetchedAt\": 1785695951200,\n"
-    "    \"rolling\": { \"used\": 1, \"resetAt\": 1785712676000, \"status\": \"ok\" },\n"
-    "    \"weekly\": { \"used\": 46, \"resetAt\": 1786000859452, \"status\": \"ok\" },\n"
-    "    \"monthly\": { \"used\": 23, \"resetAt\": 1788134400000, \"status\": \"ok\" },\n"
-    "    \"five\": { \"used\": 1, \"resetAt\": 1785712676000, \"status\": \"ok\" },\n"
-    "    \"seven\": { \"used\": 46, \"resetAt\": 1786000859452, \"status\": \"ok\" }\n"
     "  },\n"
     "  \"agy\": {\n"
     "    \"fetchedAt\": 1785695952333,\n"
@@ -157,8 +142,8 @@ static void test_normalize_url(void)
     CHECK(strcmp(buf, "https://h:8443/api/usage") == 0);
 
     config_normalize_url(buf, sizeof(buf),
-                         "h:8787?providers=grok,claude");
-    CHECK(strcmp(buf, "http://h:8787/api/usage?providers=grok,claude") == 0);
+                         "h:8787?providers=grok,codex");
+    CHECK(strcmp(buf, "http://h:8787/api/usage?providers=grok,codex") == 0);
 
     config_normalize_url(buf, sizeof(buf),
                          "http://h/api/usage?providers=grok&providers=kimi");
@@ -351,10 +336,8 @@ static void test_parse_full_example(void)
     CHECK(snap.has_generated_at == 1);
     CHECK(snap.generated_at == 1785695952333LL);
     CHECK(snap.providers.grok == 1);
-    CHECK(snap.providers.claude == 1);
     CHECK(snap.providers.codex == 1);
     CHECK(snap.providers.kimi == 1);
-    CHECK(snap.providers.opencode == 1);
     CHECK(snap.providers.agy == 1);
 
     CHECK(snap.grok.has_fetched_at == 1);
@@ -363,28 +346,13 @@ static void test_parse_full_example(void)
     CHECK(snap.grok.seven.valid == 1 && dbl_eq(snap.grok.seven.used, 8.0));
     CHECK(snap.grok.monthly.valid == 0);
 
-    CHECK(snap.claude.has_fetched_at == 1);
-    CHECK(snap.claude.fetched_at == 1785695900000LL);
-    CHECK(snap.claude.five.valid == 1);
-    CHECK(dbl_eq(snap.claude.five.used, 18.0));
-    CHECK(snap.claude.five.has_reset_at == 1);
-    CHECK(snap.claude.five.reset_at == 1785712676000LL);
-    CHECK(snap.claude.seven.valid == 1);
-    CHECK(dbl_eq(snap.claude.seven.used, 42.0));
-    CHECK(snap.claude.seven.reset_at == 1786300383000LL);
-
+    CHECK(snap.codex.has_fetched_at == 1);
+    CHECK(snap.codex.fetched_at == 1785695910000LL);
     CHECK(snap.codex.five.valid == 1 && dbl_eq(snap.codex.five.used, 12.0));
     CHECK(snap.codex.seven.valid == 1 && dbl_eq(snap.codex.seven.used, 34.0));
     CHECK(snap.kimi.five.valid == 1 && dbl_eq(snap.kimi.five.used, 2.0));
     CHECK(snap.kimi.five.reset_at == 1785709259452LL);
     CHECK(snap.kimi.seven.valid == 1 && dbl_eq(snap.kimi.seven.used, 25.0));
-
-    CHECK(snap.opencode.has_fetched_at == 1);
-    CHECK(snap.opencode.fetched_at == 1785695951200LL);
-    CHECK(snap.opencode.five.valid == 1 && dbl_eq(snap.opencode.five.used, 1.0));
-    CHECK(snap.opencode.seven.valid == 1 && dbl_eq(snap.opencode.seven.used, 46.0));
-    CHECK(snap.opencode.monthly.valid == 1 && dbl_eq(snap.opencode.monthly.used, 23.0));
-    CHECK(snap.opencode.monthly.rate_limited == 0);
 
     CHECK(snap.agy.has_fetched_at == 1);
     CHECK(snap.agy.fetched_at == 1785695952333LL);
@@ -406,61 +374,43 @@ static void test_parse_provider_selection(void)
     QuotaSnapshot snap;
     const char *json =
         "{ \"providers\": {"
-        " \"grok\": true, \"claude\": false, \"codex\": false,"
-        " \"kimi\": true, \"opencode\": false, \"agy\": false } }";
+        " \"grok\": true, \"codex\": false,"
+        " \"kimi\": true, \"agy\": false } }";
 
     CHECK(quota_parse_snapshot(json, &snap) == 0);
     CHECK(snap.providers.grok == 1);
-    CHECK(snap.providers.claude == 0);
     CHECK(snap.providers.codex == 0);
     CHECK(snap.providers.kimi == 1);
-    CHECK(snap.providers.opencode == 0);
     CHECK(snap.providers.agy == 0);
 
     /* Missing map/keys and malformed values retain the backward-compatible
      * all-enabled default instead of unexpectedly hiding cards. */
     CHECK(quota_parse_snapshot(
-        "{ \"providers\": { \"grok\": false, \"claude\": \"false\" } }",
+        "{ \"providers\": { \"grok\": false, \"codex\": \"false\" } }",
         &snap) == 0);
     CHECK(snap.providers.grok == 0);
-    CHECK(snap.providers.claude == 1);
     CHECK(snap.providers.codex == 1);
     CHECK(snap.providers.kimi == 1);
-    CHECK(snap.providers.opencode == 1);
     CHECK(snap.providers.agy == 1);
 
     CHECK(quota_parse_snapshot("{}", &snap) == 0);
     CHECK(snap.providers.grok == 1 && snap.providers.agy == 1);
 }
 
-static void test_parse_opencode_names_and_status(void)
+static void test_parse_window_status(void)
 {
     QuotaSnapshot snap;
+    const char *json =
+        "{ \"codex\": {"
+        " \"five\": { \"used\": 100, \"status\": \"rate-limited\" },"
+        " \"seven\": { \"used\": 34, \"status\": \"ok\" } } }";
 
-    /* Canonical fields win over compatibility aliases, including a canonical
-     * null. A rate-limited window remains valid and preserves its status. */
-    const char *canonical =
-        "{ \"opencode\": {"
-        " \"rolling\": null,"
-        " \"weekly\": { \"used\": 100, \"status\": \"rate-limited\" },"
-        " \"monthly\": { \"used\": 23, \"status\": \"ok\" },"
-        " \"five\": { \"used\": 12 },"
-        " \"seven\": { \"used\": 34 } } }";
-
-    CHECK(quota_parse_snapshot(canonical, &snap) == 0);
-    CHECK(snap.opencode.five.valid == 0);
-    CHECK(snap.opencode.seven.valid == 1);
-    CHECK(dbl_eq(snap.opencode.seven.used, 100.0));
-    CHECK(snap.opencode.seven.rate_limited == 1);
-    CHECK(snap.opencode.monthly.valid == 1);
-    CHECK(snap.opencode.monthly.rate_limited == 0);
-
-    /* Older/partial payloads with aliases only remain readable. */
-    CHECK(quota_parse_snapshot(
-        "{ \"opencode\": { \"five\": { \"used\": 7 },"
-        " \"seven\": { \"used\": 9 } } }", &snap) == 0);
-    CHECK(snap.opencode.five.valid == 1 && dbl_eq(snap.opencode.five.used, 7.0));
-    CHECK(snap.opencode.seven.valid == 1 && dbl_eq(snap.opencode.seven.used, 9.0));
+    CHECK(quota_parse_snapshot(json, &snap) == 0);
+    CHECK(snap.codex.five.valid == 1);
+    CHECK(dbl_eq(snap.codex.five.used, 100.0));
+    CHECK(snap.codex.five.rate_limited == 1);
+    CHECK(snap.codex.seven.valid == 1);
+    CHECK(snap.codex.seven.rate_limited == 0);
 }
 
 static void test_parse_kimi_null(void)
@@ -468,7 +418,7 @@ static void test_parse_kimi_null(void)
     /* kimi provider null must not affect any other card. */
     const char *json =
         "{ \"displayMode\": \"used\","
-        " \"claude\": { \"five\": { \"used\": 18, \"resetAt\": 1785712676000 },"
+        " \"codex\": { \"five\": { \"used\": 18, \"resetAt\": 1785712676000 },"
         "             \"seven\": { \"used\": 42, \"resetAt\": 1786300383000 } },"
         " \"kimi\": null,"
         " \"agy\": { \"gemini\": { \"five\": null, \"seven\": null },"
@@ -479,8 +429,8 @@ static void test_parse_kimi_null(void)
     CHECK(quota_parse_snapshot(json, &snap) == 0);
     CHECK(snap.kimi.five.valid == 0);
     CHECK(snap.kimi.seven.valid == 0);
-    CHECK(snap.claude.five.valid == 1 && dbl_eq(snap.claude.five.used, 18.0));
-    CHECK(snap.claude.seven.valid == 1 && dbl_eq(snap.claude.seven.used, 42.0));
+    CHECK(snap.codex.five.valid == 1 && dbl_eq(snap.codex.five.used, 18.0));
+    CHECK(snap.codex.seven.valid == 1 && dbl_eq(snap.codex.seven.used, 42.0));
     CHECK(snap.agy.gemini.five.valid == 0);
     CHECK(snap.agy.gemini.seven.valid == 0);
     CHECK(snap.agy.third_party.five.valid == 1 && dbl_eq(snap.agy.third_party.five.used, 0.0));
@@ -493,28 +443,28 @@ static void test_parse_remaining_mode(void)
 {
     const char *json =
         "{ \"displayMode\": \"remaining\","
-        " \"claude\": { \"five\": { \"used\": 42 } } }";
+        " \"codex\": { \"five\": { \"used\": 42 } } }";
     QuotaSnapshot snap;
 
     CHECK(quota_parse_snapshot(json, &snap) == 0);
     CHECK(strcmp(snap.display_mode, "remaining") == 0);
     CHECK(snap.alert_percent == 85.0);
-    CHECK(snap.claude.five.valid == 1 && dbl_eq(snap.claude.five.used, 42.0));
-    CHECK(dbl_eq(quota_display_value(&snap.claude.five, snap.display_mode), 58.0));
-    CHECK(dbl_eq(quota_display_value(&snap.claude.five, "used"), 42.0));
+    CHECK(snap.codex.five.valid == 1 && dbl_eq(snap.codex.five.used, 42.0));
+    CHECK(dbl_eq(quota_display_value(&snap.codex.five, snap.display_mode), 58.0));
+    CHECK(dbl_eq(quota_display_value(&snap.codex.five, "used"), 42.0));
 
     CHECK(quota_parse_snapshot(
-        "{ \"displayMode\": \"used\", \"claude\": { \"five\": { \"used\": 42 } } }",
+        "{ \"displayMode\": \"used\", \"codex\": { \"five\": { \"used\": 42 } } }",
         &snap) == 0);
     CHECK(strcmp(snap.display_mode, "used") == 0);
-    CHECK(dbl_eq(quota_display_value(&snap.claude.five, snap.display_mode), 42.0));
+    CHECK(dbl_eq(quota_display_value(&snap.codex.five, snap.display_mode), 42.0));
 
     CHECK(quota_parse_snapshot("{}", &snap) == 0);
     CHECK(strcmp(snap.display_mode, "remaining") == 0);
 
     /* Non-numeric used -> window invalid. */
-    CHECK(quota_parse_snapshot("{ \"claude\": { \"five\": { \"used\": \"42\" } } }", &snap) == 0);
-    CHECK(snap.claude.five.valid == 0);
+    CHECK(quota_parse_snapshot("{ \"codex\": { \"five\": { \"used\": \"42\" } } }", &snap) == 0);
+    CHECK(snap.codex.five.valid == 0);
 }
 
 static void test_parse_garbage(void)
@@ -525,6 +475,8 @@ static void test_parse_garbage(void)
     CHECK(quota_parse_snapshot("[1,2,3]", &snap) == -1);
     CHECK(quota_parse_snapshot("\"hello\"", &snap) == -1);
     CHECK(quota_parse_snapshot("", &snap) == -1);
+    CHECK(quota_parse_snapshot("{} trailing", &snap) == -1);
+    CHECK(quota_parse_snapshot("{} \n\t", &snap) == 0);
 }
 
 static void test_parse_out_of_range(void)
@@ -534,16 +486,16 @@ static void test_parse_out_of_range(void)
      * carries them stays valid. */
     const char *json =
         "{ \"generatedAt\": 1e300,"
-        " \"claude\": { \"five\": { \"used\": 18, \"resetAt\": 1e300 },"
+        " \"codex\": { \"five\": { \"used\": 18, \"resetAt\": 1e300 },"
         "             \"seven\": { \"used\": 42, \"resetAt\": -1e300 } } }";
     QuotaSnapshot snap;
 
     CHECK(quota_parse_snapshot(json, &snap) == 0);
     CHECK(snap.has_generated_at == 0);
-    CHECK(snap.claude.five.valid == 1);
-    CHECK(snap.claude.five.has_reset_at == 0);
-    CHECK(snap.claude.seven.valid == 1);
-    CHECK(snap.claude.seven.has_reset_at == 0);
+    CHECK(snap.codex.five.valid == 1);
+    CHECK(snap.codex.five.has_reset_at == 0);
+    CHECK(snap.codex.seven.valid == 1);
+    CHECK(snap.codex.seven.has_reset_at == 0);
 
     /* In-range values still parse. */
     CHECK(quota_parse_snapshot("{ \"generatedAt\": 1785695952333 }", &snap) == 0);
@@ -634,7 +586,7 @@ static void test_http_get(void)
         free(body);
     }
 
-    body = http_get("http://127.0.0.1:18080/index.txt?providers=grok,claude",
+    body = http_get("http://127.0.0.1:18080/index.txt?providers=grok,codex",
                     &status, err, sizeof(err));
     CHECK(body != NULL);
     if (body) {
@@ -819,33 +771,26 @@ static void test_ui_cards_from_providers(void)
     CHECK(ids[2] == UI_CARD_INFO);
 
     p.grok = 1;
-    p.claude = 1;
     p.codex = 1;
     p.kimi = 1;
-    p.opencode = 1;
-    p.agy = 1;
-    n = ui_cards_from_providers(&p, ids, UI_CARD_SLOTS);
-    CHECK(n == 8);
-    CHECK(ids[0] == UI_CARD_GROK);
-    CHECK(ids[1] == UI_CARD_CLAUDE);
-    CHECK(ids[2] == UI_CARD_CODEX);
-    CHECK(ids[3] == UI_CARD_KIMI);
-    CHECK(ids[4] == UI_CARD_OPENCODE);
-    CHECK(ids[5] == UI_CARD_AGY_GEMINI);
-    CHECK(ids[6] == UI_CARD_AGY_THIRD);
-    CHECK(ids[7] == UI_CARD_INFO);
-
-    /* Slot number is not identity: dropping Claude/Codex must compact. */
-    p.claude = 0;
-    p.codex = 0;
     n = ui_cards_from_providers(&p, ids, UI_CARD_SLOTS);
     CHECK(n == 6);
     CHECK(ids[0] == UI_CARD_GROK);
-    CHECK(ids[1] == UI_CARD_KIMI);
-    CHECK(ids[2] == UI_CARD_OPENCODE);
+    CHECK(ids[1] == UI_CARD_CODEX);
+    CHECK(ids[2] == UI_CARD_KIMI);
     CHECK(ids[3] == UI_CARD_AGY_GEMINI);
     CHECK(ids[4] == UI_CARD_AGY_THIRD);
     CHECK(ids[5] == UI_CARD_INFO);
+
+    /* Slot number is not identity: dropping Codex must compact. */
+    p.codex = 0;
+    n = ui_cards_from_providers(&p, ids, UI_CARD_SLOTS);
+    CHECK(n == 5);
+    CHECK(ids[0] == UI_CARD_GROK);
+    CHECK(ids[1] == UI_CARD_KIMI);
+    CHECK(ids[2] == UI_CARD_AGY_GEMINI);
+    CHECK(ids[3] == UI_CARD_AGY_THIRD);
+    CHECK(ids[4] == UI_CARD_INFO);
 
     CHECK(ui_cards_from_providers(&p, ids, 1) == 1);
     CHECK(ids[0] == UI_CARD_GROK);
@@ -1184,7 +1129,7 @@ static void test_quota_display_sig(void)
 
     /* A real quota change must dirty the signature. */
     b = a;
-    b.claude.five.used = 99.0;
+    b.codex.five.used = 99.0;
     s2 = quota_display_sig(&b, "已连接", "http://x/api/usage");
     CHECK(s1 != s2);
 
@@ -1351,9 +1296,15 @@ static void test_providers_pref_and_url(void)
     CHECK(!config_provider_known("nope"));
 
     n = config_providers_normalize(list, sizeof(list),
-                                   "claude, grok, claude, unknown,agy");
+                                   "codex, grok, codex, unknown,agy");
     CHECK(n == 3);
-    CHECK(strcmp(list, "claude,grok,agy") == 0);
+    CHECK(strcmp(list, "codex,grok,agy") == 0);
+
+    /* Removed providers in old configs are ignored without resetting the rest. */
+    n = config_providers_normalize(list, sizeof(list),
+                                   "grok,claude,codex,opencode,agy");
+    CHECK(n == 3);
+    CHECK(strcmp(list, "grok,codex,agy") == 0);
 
     /* Empty / all-invalid -> default (never all-off). */
     n = config_providers_normalize(list, sizeof(list), "");
@@ -1365,25 +1316,25 @@ static void test_providers_pref_and_url(void)
     snprintf(list, sizeof(list), "%s", "grok");
     CHECK(config_providers_toggle(list, sizeof(list), "grok") == -1); /* refuse */
     CHECK(strcmp(list, "grok") == 0);
-    CHECK(config_providers_toggle(list, sizeof(list), "claude") == 0);
-    CHECK(strcmp(list, "grok,claude") == 0);
+    CHECK(config_providers_toggle(list, sizeof(list), "codex") == 0);
+    CHECK(strcmp(list, "grok,codex") == 0);
     CHECK(config_providers_toggle(list, sizeof(list), "grok") == 0);
-    CHECK(strcmp(list, "claude") == 0);
+    CHECK(strcmp(list, "codex") == 0);
 
-    snprintf(list, sizeof(list), "%s", "grok,claude,kimi");
-    CHECK(config_providers_move(list, sizeof(list), "claude", -1) == 0);
-    CHECK(strcmp(list, "claude,grok,kimi") == 0);
-    CHECK(config_providers_move(list, sizeof(list), "claude", +1) == 0);
-    CHECK(strcmp(list, "grok,claude,kimi") == 0);
+    snprintf(list, sizeof(list), "%s", "grok,codex,kimi");
+    CHECK(config_providers_move(list, sizeof(list), "codex", -1) == 0);
+    CHECK(strcmp(list, "codex,grok,kimi") == 0);
+    CHECK(config_providers_move(list, sizeof(list), "codex", +1) == 0);
+    CHECK(strcmp(list, "grok,codex,kimi") == 0);
 
     config_providers_to_selection("kimi,agy", &sel);
-    CHECK(!sel.grok && sel.kimi && sel.agy && !sel.claude);
+    CHECK(!sel.grok && sel.kimi && sel.agy && !sel.codex);
 
     CHECK(config_url_with_providers(url, sizeof(url),
                                     "http://h/api/usage?foo=1&providers=old&tools=x",
-                                    "claude,grok") == 0);
+                                    "codex,grok") == 0);
     CHECK(strstr(url, "foo=1") != NULL);
-    CHECK(strstr(url, "providers=claude,grok") != NULL);
+    CHECK(strstr(url, "providers=codex,grok") != NULL);
     CHECK(strstr(url, "providers=old") == NULL);
     CHECK(strstr(url, "tools=") == NULL);
 
@@ -1410,7 +1361,7 @@ static void test_config_providers_roundtrip_and_migrate(void)
     unlink("/tmp/aiquota_cfg_prov.ini.bak");
     config_defaults(&cfg);
     snprintf(cfg.show_providers, sizeof(cfg.show_providers), "%s",
-             "agy,claude");
+             "agy,codex");
     cfg.display_mode_pref = 3; /* large */
     cfg.refresh_preset = 2;
     cfg.config_version = CONFIG_VERSION_CURRENT;
@@ -1420,7 +1371,7 @@ static void test_config_providers_roundtrip_and_migrate(void)
 
     config_defaults(&back);
     CHECK(config_load(&back, path) == 0);
-    CHECK(strcmp(back.show_providers, "agy,claude") == 0);
+    CHECK(strcmp(back.show_providers, "agy,codex") == 0);
     CHECK(back.display_mode_pref == 3);
     CHECK(back.refresh_preset == 2);
     CHECK(back.config_version == CONFIG_VERSION_CURRENT);
@@ -1436,7 +1387,7 @@ static void test_config_providers_roundtrip_and_migrate(void)
     }
     config_defaults(&back);
     CHECK(config_load_with_backup(&back, path) == 0);
-    CHECK(strcmp(back.show_providers, "agy,claude") == 0);
+    CHECK(strcmp(back.show_providers, "agy,codex") == 0);
 
     /* Migrate v1 -> current. */
     config_defaults(&cfg);
@@ -1482,7 +1433,7 @@ int main(void)
     RUN(test_config_save_atomic);
     RUN(test_parse_full_example);
     RUN(test_parse_provider_selection);
-    RUN(test_parse_opencode_names_and_status);
+    RUN(test_parse_window_status);
     RUN(test_parse_kimi_null);
     RUN(test_parse_remaining_mode);
     RUN(test_parse_garbage);

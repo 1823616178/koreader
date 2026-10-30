@@ -1,6 +1,6 @@
 # AI Credits Usage API
 
-本文档描述如何从其他项目读取本仪表盘聚合的 Claude Code、Codex、Kimi Code 和 Antigravity（AGY）额度。
+本文档描述如何从其他项目读取本仪表盘聚合的 Codex、Kimi Code 和 Antigravity（AGY）额度。
 
 ## 接口概览
 
@@ -49,7 +49,7 @@ response = requests.get("http://127.0.0.1:8787/api/usage", timeout=45)
 response.raise_for_status()
 usage = response.json()
 
-print(usage["claude"]["five"])
+print(usage["codex"]["five"])
 print(usage["agy"]["thirdParty"]["seven"])
 ```
 
@@ -62,17 +62,6 @@ print(usage["agy"]["thirdParty"]["seven"])
   "displayMode": "used",
   "alertPercent": 85,
   "generatedAt": 1785695952333,
-  "claude": {
-    "fetchedAt": 1785695900000,
-    "five": {
-      "used": 18,
-      "resetAt": 1785712676000
-    },
-    "seven": {
-      "used": 42,
-      "resetAt": 1786300383000
-    }
-  },
   "codex": {
     "fetchedAt": 1785695910000,
     "five": {
@@ -166,7 +155,6 @@ interface UsageApiResponse {
   /** 本次 HTTP 响应生成时间，Unix epoch 毫秒。 */
   generatedAt: number;
 
-  claude: ProviderUsage;
   codex: ProviderUsage;
   kimi: ProviderUsage;
   agy: AgyUsage;
@@ -195,7 +183,7 @@ const remaining = Math.max(0, Math.min(100, 100 - window.used));
 ### 窗口名称
 
 - `five`：5 小时额度窗口。
-- `seven`：周额度窗口。字段名保留为 `seven`，用于兼容现有 Claude、Codex 和 Kimi 数据结构。
+- `seven`：周额度窗口。字段名保留为 `seven`，用于兼容现有 Codex 和 Kimi 数据结构。
 - `agy.gemini`：Antigravity 中的 Gemini 模型共享额度。
 - `agy.thirdParty`：Antigravity 中的 Claude 与 GPT 模型共享额度。
 
@@ -252,7 +240,6 @@ Content-Type: application/json; charset=utf-8
 
 | 提供商 | 数据来源 | 默认刷新行为 |
 | --- | --- | --- |
-| Claude | 本地 StatusLine 额度缓存 | 每次请求读取 |
 | Codex | 本地会话中的最新 rate limit 快照 | 服务端短缓存约 8 秒 |
 | Kimi | 临时启动官方本地服务 | 默认缓存 300 秒，最低 60 秒 |
 | AGY | 临时 PTY 与官方本地额度 RPC | 默认缓存 300 秒，最低 60 秒 |

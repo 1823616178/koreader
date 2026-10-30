@@ -23,10 +23,8 @@ void quota_empty_snapshot(QuotaSnapshot *snap)
     /* Backward compatibility: responses predating the providers map implied
      * that every known tool was enabled. Loading skeletons use the same set. */
     snap->providers.grok = 1;
-    snap->providers.claude = 1;
     snap->providers.codex = 1;
     snap->providers.kimi = 1;
-    snap->providers.opencode = 1;
     snap->providers.agy = 1;
 }
 
@@ -89,33 +87,6 @@ static void parse_provider(const cJSON *obj, ProviderQuota *p)
     parse_window(cJSON_GetObjectItemCaseSensitive(obj, "monthly"), &p->monthly);
 }
 
-/* OpenCode's canonical names are rolling/weekly. The five/seven aliases are
- * accepted only when the canonical key is absent, so contradictory payloads
- * deterministically prefer the documented canonical fields. */
-static void parse_opencode(const cJSON *obj, ProviderQuota *p)
-{
-    const cJSON *fetched_at;
-    const cJSON *five;
-    const cJSON *seven;
-
-    if (!cJSON_IsObject(obj))
-        return;
-    fetched_at = cJSON_GetObjectItemCaseSensitive(obj, "fetchedAt");
-    if (cJSON_IsNumber(fetched_at) &&
-        double_to_ll(fetched_at->valuedouble, &p->fetched_at) == 0)
-        p->has_fetched_at = 1;
-
-    five = cJSON_GetObjectItemCaseSensitive(obj, "rolling");
-    if (!five)
-        five = cJSON_GetObjectItemCaseSensitive(obj, "five");
-    seven = cJSON_GetObjectItemCaseSensitive(obj, "weekly");
-    if (!seven)
-        seven = cJSON_GetObjectItemCaseSensitive(obj, "seven");
-    parse_window(five, &p->five);
-    parse_window(seven, &p->seven);
-    parse_window(cJSON_GetObjectItemCaseSensitive(obj, "monthly"), &p->monthly);
-}
-
 static int provider_enabled(const cJSON *providers, const char *name, int fallback)
 {
     const cJSON *item;
@@ -128,7 +99,7 @@ static int provider_enabled(const cJSON *providers, const char *name, int fallba
 
 int quota_parse_snapshot(const char *json, QuotaSnapshot *snap)
 {
-    cJSON *root = cJSON_Parse(json);
+    cJSON *root = cJSON_ParseWithOpts(json, NULL, 1);
     const cJSON *item;
 
     if (!root)
@@ -155,17 +126,13 @@ int quota_parse_snapshot(const char *json, QuotaSnapshot *snap)
 
     item = cJSON_GetObjectItemCaseSensitive(root, "providers");
     snap->providers.grok = provider_enabled(item, "grok", snap->providers.grok);
-    snap->providers.claude = provider_enabled(item, "claude", snap->providers.claude);
     snap->providers.codex = provider_enabled(item, "codex", snap->providers.codex);
     snap->providers.kimi = provider_enabled(item, "kimi", snap->providers.kimi);
-    snap->providers.opencode = provider_enabled(item, "opencode", snap->providers.opencode);
     snap->providers.agy = provider_enabled(item, "agy", snap->providers.agy);
 
     parse_provider(cJSON_GetObjectItemCaseSensitive(root, "grok"), &snap->grok);
-    parse_provider(cJSON_GetObjectItemCaseSensitive(root, "claude"), &snap->claude);
     parse_provider(cJSON_GetObjectItemCaseSensitive(root, "codex"), &snap->codex);
     parse_provider(cJSON_GetObjectItemCaseSensitive(root, "kimi"), &snap->kimi);
-    parse_opencode(cJSON_GetObjectItemCaseSensitive(root, "opencode"), &snap->opencode);
 
     {
         const cJSON *agy = cJSON_GetObjectItemCaseSensitive(root, "agy");
@@ -349,23 +316,17 @@ unsigned long long quota_display_sig(const QuotaSnapshot *snap,
     h = fnv1a_add(h, ts);
 
     h ^= (unsigned long long)(snap->providers.grok & 1);
-    h ^= (unsigned long long)(snap->providers.claude & 1) << 1;
-    h ^= (unsigned long long)(snap->providers.codex & 1) << 2;
-    h ^= (unsigned long long)(snap->providers.kimi & 1) << 3;
-    h ^= (unsigned long long)(snap->providers.opencode & 1) << 4;
-    h ^= (unsigned long long)(snap->providers.agy & 1) << 5;
+    h ^= (unsigned long long)(snap->providers.codex & 1) << 1;
+    h ^= (unsigned long long)(snap->providers.kimi & 1) << 2;
+    h ^= (unsigned long long)(snap->providers.agy & 1) << 3;
     h *= 0x100000001b3ULL;
 
     if (snap->providers.grok)
         h = fnv1a_add_provider(h, &snap->grok, mode, 1, now_ms);
-    if (snap->providers.claude)
-        h = fnv1a_add_provider(h, &snap->claude, mode, 0, now_ms);
     if (snap->providers.codex)
         h = fnv1a_add_provider(h, &snap->codex, mode, 0, now_ms);
     if (snap->providers.kimi)
         h = fnv1a_add_provider(h, &snap->kimi, mode, 0, now_ms);
-    if (snap->providers.opencode)
-        h = fnv1a_add_provider(h, &snap->opencode, mode, 1, now_ms);
     if (snap->providers.agy) {
         quota_format_timestamp_min(ts, sizeof(ts), snap->agy.has_fetched_at,
                                    snap->agy.fetched_at);

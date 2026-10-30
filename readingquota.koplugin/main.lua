@@ -1,5 +1,5 @@
 --[[--
-AI credits: a compact full-screen dashboard for Claude, Codex, Kimi and AGY.
+AI credits: a compact full-screen dashboard for Codex, Kimi and AGY.
 
 Reachable from the file manager as well as from a book, so it can be used as a
 standalone screen rather than only as a reader accessory.

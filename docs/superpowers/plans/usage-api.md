@@ -1,6 +1,6 @@
 # AI Credits Usage API
 
-本仪表盘把本机已登录的 Grok、Claude Code、Codex、Kimi Code、OpenCode Go 和 Antigravity（AGY）额度聚合成一个只读 HTTP 接口。其他项目应调用本接口，不要直接去读各 CLI 的凭据文件或会话目录。
+本仪表盘把本机已登录的 Grok、Codex、Kimi Code 和 Antigravity（AGY）额度聚合成一个只读 HTTP 接口。其他项目应调用本接口，不要直接去读各 CLI 的凭据文件或会话目录。
 
 文档对照实现日期：2026-08-27。接口尚未带版本号。
 
@@ -27,20 +27,18 @@ HOST=127.0.0.1 PORT=8787 node server.js
 
 ## 采集名单
 
-改下面这块即可控制本机采集哪些工具：`true` 采集，`false` 跳过。也可以写成名称数组，例如 `["grok", "claude"]`。仪表盘 Track 按钮会改写这一块。每次请求都会重新读取，保存后无需重启。
+改下面这块即可控制本机采集哪些工具：`true` 采集，`false` 跳过。也可以写成名称数组，例如 `["grok", "codex"]`。仪表盘 Track 按钮会改写这一块。每次请求都会重新读取，保存后无需重启。
 
 ```providers
 {
   "grok": true,
-  "claude": true,
   "codex": true,
   "kimi": true,
-  "opencode": true,
   "agy": true
 }
 ```
 
-可用名字：`grok`、`claude`、`codex`、`kimi`、`opencode`、`agy`。
+可用名字：`grok`、`codex`、`kimi`、`agy`。
 
 ---
 
@@ -77,10 +75,10 @@ Host: 127.0.0.1:8787
 | --- | --- |
 | `providers` | 本次要返回额度的工具，逗号分隔。别名：`tools`、`tool`、`provider`。可重复。 |
 
-可用名字：`grok`、`claude`、`codex`、`kimi`、`opencode`、`agy`。
+可用名字：`grok`、`codex`、`kimi`、`agy`。
 
 ```http
-GET /api/usage?providers=grok,claude
+GET /api/usage?providers=grok,codex
 GET /api/usage?tools=codex
 GET /api/usage?providers=grok&providers=kimi
 ```
@@ -90,7 +88,7 @@ GET /api/usage?providers=grok&providers=kimi
 全部名字都不认识时返回 HTTP `400`：
 
 ```json
-{ "error": "Unknown tool. Use grok, claude, codex, kimi, opencode, agy" }
+{ "error": "Unknown tool. Use grok, codex, kimi, agy" }
 ```
 
 ### 成功响应
@@ -135,10 +133,8 @@ GET /api/providers HTTP/1.1
 {
   "providers": {
     "grok": true,
-    "claude": true,
     "codex": false,
     "kimi": true,
-    "opencode": true,
     "agy": false
   }
 }
@@ -159,7 +155,7 @@ Content-Type: application/json
 
 ### 超时
 
-首次请求可能要等 Grok / Claude / Kimi / AGY 拉起临时进程。客户端超时建议 **≥ 45 秒**。缓存命中后通常很快。
+首次请求可能要等 Grok / Kimi / AGY 拉起临时进程。客户端超时建议 **≥ 45 秒**。缓存命中后通常很快。
 
 ---
 
@@ -170,12 +166,10 @@ Content-Type: application/json
 | `displayMode` | `"used"` \| `"remaining"` | 前台默认显示模式。默认 `"remaining"`。**不改变**各窗口 `used` 的含义。 |
 | `alertPercent` | `number` | 已用百分比警示阈值，默认 `85`。 |
 | `generatedAt` | `number` | 本次 HTTP 响应生成时间，Unix epoch **毫秒**。 |
-| `providers` | `object` | 各工具是否纳入统计，键为 `grok` / `claude` / `codex` / `kimi` / `opencode` / `agy`，值为布尔。 |
+| `providers` | `object` | 各工具是否纳入统计，键为 `grok` / `codex` / `kimi` / `agy`，值为布尔。 |
 | `grok` | `GrokUsage` | Grok Build / SuperGrok |
-| `claude` | `ProviderUsage` | Claude Code |
 | `codex` | `ProviderUsage` | Codex |
 | `kimi` | `ProviderUsage` | Kimi Code |
-| `opencode` | `OpencodeUsage` | OpenCode Go |
 | `agy` | `AgyUsage` | Antigravity |
 
 时间戳一律是 Unix epoch 毫秒，可直接 `new Date(value)`。
@@ -188,7 +182,7 @@ Content-Type: application/json
 interface UsageWindow {
   used: number;          // 已用百分比，0–100，可为小数。0 是有效值。
   resetAt: number | null; // 窗口预计重置时间；未知为 null
-  status?: "ok" | "rate-limited"; // 目前仅 OpenCode 出现
+  status?: "ok" | "rate-limited"; // 可选的窗口状态
 }
 ```
 
@@ -204,11 +198,9 @@ const remaining = Math.max(0, Math.min(100, 100 - window.used));
 
 | 字段 | 含义 |
 | --- | --- |
-| `five` | 5 小时窗口。OpenCode 上是 `rolling` 的兼容别名。 |
-| `seven` | 周窗口。名字保留为 `seven`，兼容既有 Claude / Codex / Kimi 结构。 |
-| `monthly` | 月窗口。Grok 面板出现时才会有值；OpenCode 始终尝试填充。 |
-| `rolling` | OpenCode Go 滚动 5 小时窗口。 |
-| `weekly` | OpenCode Go 周窗口。 |
+| `five` | 5 小时窗口。 |
+| `seven` | 周窗口。名字保留为 `seven`，兼容既有 Codex / Kimi 结构。 |
+| `monthly` | 月窗口。Grok 面板出现时才会有值。 |
 
 当前 Grok SuperGrok 的 `/usage` 面板通常只有周额度：`five` / `monthly` 多为 `null`，有效数据在 `seven`。
 
@@ -216,7 +208,7 @@ const remaining = Math.max(0, Math.min(100, 100 - window.used));
 
 ## 6. 各提供商结构
 
-### Grok、Claude、Codex、Kimi
+### Grok、Codex、Kimi
 
 ```ts
 interface ProviderUsage {
@@ -241,21 +233,6 @@ interface GrokUsage extends ProviderUsage {
 ```
 
 Grok 无数据时多一个 `monthly: null`。
-
-### OpenCode Go
-
-```ts
-interface OpencodeUsage {
-  fetchedAt: number | null;
-  rolling: UsageWindow | null;
-  weekly: UsageWindow | null;
-  monthly: UsageWindow | null;
-  five?: UsageWindow | null;   // 等于 rolling
-  seven?: UsageWindow | null;  // 等于 weekly
-}
-```
-
-`five` / `seven` 是兼容别名，新代码优先读 `rolling` / `weekly` / `monthly`。
 
 窗口被限流时 `status` 为 `"rate-limited"`，且 `used` 记为 `100`。
 
@@ -287,10 +264,8 @@ interface AgyUsage {
   "generatedAt": 1785695952333,
   "providers": {
     "grok": true,
-    "claude": true,
     "codex": true,
     "kimi": true,
-    "opencode": true,
     "agy": true
   },
   "grok": {
@@ -298,11 +273,6 @@ interface AgyUsage {
     "five": null,
     "seven": { "used": 8, "resetAt": 1788408060000 },
     "monthly": null
-  },
-  "claude": {
-    "fetchedAt": 1785695900000,
-    "five": { "used": 18, "resetAt": 1785712676000 },
-    "seven": { "used": 42, "resetAt": 1786300383000 }
   },
   "codex": {
     "fetchedAt": 1785695910000,
@@ -313,14 +283,6 @@ interface AgyUsage {
     "fetchedAt": 1785695950844,
     "five": { "used": 2, "resetAt": 1785709259452 },
     "seven": { "used": 25, "resetAt": 1786000859452 }
-  },
-  "opencode": {
-    "fetchedAt": 1785695951200,
-    "rolling": { "used": 1, "resetAt": 1785712676000, "status": "ok" },
-    "weekly": { "used": 46, "resetAt": 1786000859452, "status": "ok" },
-    "monthly": { "used": 23, "resetAt": 1788134400000, "status": "ok" },
-    "five": { "used": 1, "resetAt": 1785712676000, "status": "ok" },
-    "seven": { "used": 46, "resetAt": 1786000859452, "status": "ok" }
   },
   "agy": {
     "fetchedAt": 1785695952333,
@@ -347,7 +309,7 @@ curl --fail --silent --show-error \
   http://127.0.0.1:8787/api/usage
 
 curl --fail --silent --show-error \
-  'http://127.0.0.1:8787/api/usage?providers=grok,claude'
+  'http://127.0.0.1:8787/api/usage?providers=grok,codex'
 ```
 
 只取 Grok 周剩余：
@@ -371,8 +333,8 @@ const remaining = (window) =>
   typeof window?.used === 'number' ? Math.max(0, Math.min(100, 100 - window.used)) : null;
 
 console.log('Grok weekly remaining:', remaining(usage.grok.seven));
-console.log('Claude 5h remaining:', remaining(usage.claude.five));
-console.log('OpenCode rolling used:', usage.opencode.rolling?.used);
+console.log('Codex 5h remaining:', remaining(usage.codex.five));
+console.log('Kimi weekly used:', usage.kimi.seven?.used);
 console.log('AGY Gemini 5h used:', usage.agy.gemini.five?.used);
 ```
 
@@ -391,8 +353,8 @@ def remaining(window):
     return max(0, min(100, 100 - window["used"]))
 
 print(remaining(usage["grok"]["seven"]))
-print(usage["claude"]["five"])
-print(usage["opencode"]["rolling"])
+print(usage["codex"]["five"])
+print(usage["kimi"]["seven"])
 print(usage["agy"]["thirdParty"]["seven"])
 ```
 
@@ -414,10 +376,8 @@ type UsageWindow struct {
 | 提供商 | 数据来源 | 默认刷新 |
 | --- | --- | --- |
 | Grok | PTY 启动官方 `grok`，打开 `/usage` 面板后解析，写入 `~/.grok/usage-cache.json` | 缓存 300 秒，最低 60 秒；失败后约 60 秒再试 |
-| Claude | PTY 启动官方 `claude`，打开 `/usage` 面板后解析，写入 `~/.claude/usage-cache.json` | 同上 |
 | Codex | 优先官方 app-server 限额快照，失败则 PTY `/status`；再失败则扫描 `~/.codex/sessions` | 成功后缓存 300 秒；失败回退会话文件，约 60 秒再试 |
 | Kimi | 临时启动 `kimi web --no-open`，只请求本机 `/api/v1/oauth/usage` | 缓存 300 秒；失败保留上次成功结果 |
-| OpenCode | 官方 `GET https://opencode.ai/zen/go/v1/usage` | 缓存 300 秒；失败保留上次成功结果 |
 | AGY | 临时 PTY 启动 `agy`，只调本机 `RetrieveUserQuotaSummary` | 缓存 300 秒；失败保留上次成功结果 |
 
 并发请求会共用同一次采集，不会并行拉起多个 CLI。
@@ -425,7 +385,6 @@ type UsageWindow struct {
 可用环境变量关闭主动刷新（只读缓存 / 会话文件）：
 
 - `GROK_ACTIVE_REFRESH=false`
-- `CLAUDE_ACTIVE_REFRESH=false`
 - `CODEX_ACTIVE_REFRESH=false`
 
 ---
@@ -445,7 +404,7 @@ type UsageWindow struct {
 3. 窗口对象、`fetchedAt`、`resetAt` 都可空。
 4. `used === 0` 表示额度没用过，不是“没有数据”。
 5. 不要根据 `displayMode` 改读 `used`。前台显示剩余时在客户端用 `100 - used`。
-6. Grok 的 `monthly`、OpenCode 的 `rolling` / `weekly` / `monthly` 都可能为 `null`。
+6. Grok 的 `monthly` 可能为 `null`。
 
 ---
 

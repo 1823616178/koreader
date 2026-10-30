@@ -24,8 +24,8 @@
 
 /* F02: local ordered visibility list. Comma-separated provider ids; order is
  * card/request order. Does NOT call PUT /api/providers. */
-#define CONFIG_PROVIDERS_DEFAULT "grok,claude,codex,kimi,opencode,agy"
-#define CONFIG_PROVIDERS_MAX 6
+#define CONFIG_PROVIDERS_DEFAULT "grok,codex,kimi,agy"
+#define CONFIG_PROVIDERS_MAX 4
 
 typedef struct {
     char api_url[512];   /* normalized path ends with /api/usage; optional query follows */

@@ -17,16 +17,14 @@ typedef enum { UI_ACTION_NONE = 0, UI_ACTION_REFRESH, UI_ACTION_SETTINGS, UI_ACT
 typedef enum {
     UI_CARD_NONE = 0,
     UI_CARD_GROK,
-    UI_CARD_CLAUDE,
     UI_CARD_CODEX,
     UI_CARD_KIMI,
-    UI_CARD_OPENCODE,
     UI_CARD_AGY_GEMINI,
     UI_CARD_AGY_THIRD,
     UI_CARD_INFO
 } UiCard;
 
-enum { UI_CARD_SLOTS = 9 };
+enum { UI_CARD_SLOTS = 7 };
 
 /* dpi comes from fbink_get_state(); font_path is the bundled Noto Sans SC subset (loaded via fbink_add_ot_font).
  * Returns NULL on failure (bad font_path/OOM); caller must check. */
@@ -178,14 +176,10 @@ static inline int ui_cards_append_provider(const ProviderSelection *p,
         return n;
     if (strcmp(name, "grok") == 0 && p->grok)
         ids[n++] = UI_CARD_GROK;
-    else if (strcmp(name, "claude") == 0 && p->claude)
-        ids[n++] = UI_CARD_CLAUDE;
     else if (strcmp(name, "codex") == 0 && p->codex)
         ids[n++] = UI_CARD_CODEX;
     else if (strcmp(name, "kimi") == 0 && p->kimi)
         ids[n++] = UI_CARD_KIMI;
-    else if (strcmp(name, "opencode") == 0 && p->opencode)
-        ids[n++] = UI_CARD_OPENCODE;
     else if (strcmp(name, "agy") == 0 && p->agy) {
         if (n < max)
             ids[n++] = UI_CARD_AGY_GEMINI;
@@ -203,10 +197,10 @@ static inline int ui_cards_from_providers_ex(const ProviderSelection *p,
                                              int max)
 {
     static const char *def_order[] = {
-        "grok", "claude", "codex", "kimi", "opencode", "agy"
+        "grok", "codex", "kimi", "agy"
     };
     int n = 0;
-    int used[6] = {0, 0, 0, 0, 0, 0};
+    int used[4] = {0, 0, 0, 0};
     int i;
 
     if (!p || !ids || max <= 0)
@@ -235,7 +229,7 @@ static inline int ui_cards_from_providers_ex(const ProviderSelection *p,
                 s++;
             if (!part[0])
                 continue;
-            for (j = 0; j < 6; j++) {
+            for (j = 0; j < 4; j++) {
                 if (strcmp(part, def_order[j]) == 0) {
                     if (!used[j]) {
                         n = ui_cards_append_provider(p, def_order[j], ids, n, max);
@@ -247,7 +241,7 @@ static inline int ui_cards_from_providers_ex(const ProviderSelection *p,
         }
     }
 
-    for (i = 0; i < 6; i++) {
+    for (i = 0; i < 4; i++) {
         if (used[i])
             continue;
         n = ui_cards_append_provider(p, def_order[i], ids, n, max);

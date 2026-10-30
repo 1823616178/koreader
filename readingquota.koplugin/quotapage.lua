@@ -1,8 +1,8 @@
 --[[--
 Compact full-screen AI credits dashboard.
 
-Five equal tiles fit on one page: Claude Code, Codex, Kimi Code, AGY Gemini,
-and AGY Claude/GPT. The sixth tile carries connection metadata and controls.
+Four equal provider tiles show Codex, Kimi Code, AGY Gemini and AGY Claude/GPT.
+A full-width tile below them carries connection metadata and controls.
 
 @module koplugin.ReadingQuota.QuotaPage
 --]]--
@@ -59,6 +59,7 @@ function QuotaPage:init()
     self.loading = true
     self.error_text = nil
     self.request_started = false
+    self.closed = false
 
     self:registerKeyEvents()
     if Device:isTouchDevice() then
@@ -84,9 +85,10 @@ local function textWidget(text, face, max_width)
     }
 end
 
-function QuotaPage:buildValueLine(label, value)
-    local label_width = math.floor(self.card_inner_width * 0.42)
-    local value_width = self.card_inner_width - label_width
+function QuotaPage:buildValueLine(label, value, inner_width)
+    inner_width = inner_width or self.card_inner_width
+    local label_width = math.floor(inner_width * 0.42)
+    local value_width = inner_width - label_width
     return HorizontalGroup:new{
         LeftContainer:new{
             dimen = Geom:new{ w = label_width, h = self.line_height },
@@ -155,23 +157,26 @@ function QuotaPage:buildCard(title, windows)
     }
 end
 
-function QuotaPage:buildInfoBlock(label, value, detail)
+function QuotaPage:buildInfoBlock(label, value, detail, inner_width)
+    inner_width = inner_width or self.card_inner_width
     return VerticalGroup:new{
         align = "left",
-        self:buildValueLine(label, value),
+        self:buildValueLine(label, value, inner_width),
         LineWidget:new{
-            dimen = Geom:new{ w = self.card_inner_width, h = Screen:scaleBySize(8) },
+            dimen = Geom:new{ w = inner_width, h = Screen:scaleBySize(8) },
             background = Blitbuffer.COLOR_LIGHT_GRAY,
         },
         VerticalSpan:new{ width = Screen:scaleBySize(3) },
         LeftContainer:new{
-            dimen = Geom:new{ w = self.card_inner_width, h = self.line_height },
-            textWidget(detail, self.face_detail, self.card_inner_width),
+            dimen = Geom:new{ w = inner_width, h = self.line_height },
+            textWidget(detail, self.face_detail, inner_width),
         },
     }
 end
 
-function QuotaPage:buildInfoCard()
+function QuotaPage:buildInfoCard(width)
+    width = width or self.card_width
+    local inner_width = width - 2 * (self.card_padding + Size.border.thin)
     local state, detail
     if self.loading then
         state, detail = "连接中", QuotaData:getApiUrl()
@@ -184,7 +189,7 @@ function QuotaPage:buildInfoCard()
     local generated = "快照 " .. QuotaData.formatTimestamp(self.snapshot.generatedAt)
 
     return FrameContainer:new{
-        width = self.card_width,
+        width = width,
         bordersize = Size.border.thin,
         padding = self.card_padding,
         margin = 0,
@@ -192,13 +197,13 @@ function QuotaPage:buildInfoCard()
         VerticalGroup:new{
             align = "left",
             LeftContainer:new{
-                dimen = Geom:new{ w = self.card_inner_width, h = self.line_height },
-                textWidget("数据接口", self.face_card_title, self.card_inner_width),
+                dimen = Geom:new{ w = inner_width, h = self.line_height },
+                textWidget("数据接口", self.face_card_title, inner_width),
             },
             VerticalSpan:new{ width = Screen:scaleBySize(5) },
-            self:buildInfoBlock("状态", state, detail),
+            self:buildInfoBlock("状态", state, detail, inner_width),
             VerticalSpan:new{ width = Screen:scaleBySize(5) },
-            self:buildInfoBlock("显示", mode, generated .. " · 告警 " .. QuotaData.formatPercent(self.snapshot.alertPercent)),
+            self:buildInfoBlock("显示", mode, generated .. " · 告警 " .. QuotaData.formatPercent(self.snapshot.alertPercent), inner_width),
         },
     }
 end
@@ -234,21 +239,19 @@ function QuotaPage:buildButtons()
 end
 
 function QuotaPage:buildContent()
-    local claude = self:buildCard("Claude Code", self.snapshot.claude)
     local codex = self:buildCard("Codex", self.snapshot.codex)
     local kimi = self:buildCard("Kimi Code", self.snapshot.kimi)
     local gemini = self:buildCard("AGY · Gemini", self.snapshot.agy.gemini)
     local third_party = self:buildCard("AGY · Claude/GPT", self.snapshot.agy.thirdParty)
-    local info = self:buildInfoCard()
     local gap = VerticalSpan:new{ width = self.card_gap }
 
     return VerticalGroup:new{
         align = "center",
-        self:buildCardRow(claude, codex),
+        self:buildCardRow(codex, kimi),
         gap,
-        self:buildCardRow(kimi, gemini),
+        self:buildCardRow(gemini, third_party),
         gap,
-        self:buildCardRow(third_party, info),
+        self:buildInfoCard(self.content_width),
         gap,
         self:buildButtons(),
     }
@@ -302,7 +305,13 @@ function QuotaPage:rebuild()
 end
 
 function QuotaPage:performFetch()
+    if self.closed then
+        return
+    end
     local snapshot, err = QuotaData:fetch()
+    if self.closed then
+        return
+    end
     if snapshot then
         self.snapshot = snapshot
         self.error_text = nil
@@ -354,6 +363,7 @@ function QuotaPage:editApiUrl()
 end
 
 function QuotaPage:onClose()
+    self.closed = true
     UIManager:close(self)
     return true
 end
@@ -364,6 +374,7 @@ function QuotaPage:onMultiSwipe()
 end
 
 function QuotaPage:onCloseWidget()
+    self.closed = true
     UIManager:setDirty(nil, "full")
 end
 

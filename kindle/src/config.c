@@ -368,7 +368,7 @@ int config_cache_load(const char *path, const char *api_url,
 /* --- F02 / F05 / F07 helpers --------------------------------------------- */
 
 static const char *const PROVIDER_NAMES[CONFIG_PROVIDERS_MAX] = {
-    "grok", "claude", "codex", "kimi", "opencode", "agy"
+    "grok", "codex", "kimi", "agy"
 };
 
 int config_provider_known(const char *name)
@@ -489,14 +489,10 @@ void config_providers_to_selection(const char *list, ProviderSelection *out)
     for (i = 0; i < n; i++) {
         if (strcmp(names[i], "grok") == 0)
             out->grok = 1;
-        else if (strcmp(names[i], "claude") == 0)
-            out->claude = 1;
         else if (strcmp(names[i], "codex") == 0)
             out->codex = 1;
         else if (strcmp(names[i], "kimi") == 0)
             out->kimi = 1;
-        else if (strcmp(names[i], "opencode") == 0)
-            out->opencode = 1;
         else if (strcmp(names[i], "agy") == 0)
             out->agy = 1;
     }

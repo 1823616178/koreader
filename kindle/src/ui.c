@@ -281,9 +281,9 @@ static void draw_window_block(const Ui *ui, int x, int y, const char *label,
 static void draw_info_block(const Ui *ui, int x, int y, const char *label,
                             const char *value, const char *detail);
 
-/* Provider card. Grok/OpenCode use the third block for monthly quota; the
- * other providers use it for their collection timestamp, keeping all eight
- * cards the same height and the grid stable while data changes. */
+/* Provider card. Grok uses the third block for monthly quota; the other
+ * providers use it for their collection timestamp, keeping all six cards the
+ * same height and the grid stable while data changes. */
 static void draw_provider_card(const Ui *ui, int x, int y, const char *title,
                                const ProviderQuota *pq, const QuotaSnapshot *snap,
                                const char *five_label, const char *monthly_label)
@@ -343,10 +343,9 @@ static void draw_info_card(const Ui *ui, int x, int y, const QuotaSnapshot *snap
     quota_format_timestamp_min(ts, sizeof(ts), snap->has_generated_at, snap->generated_at);
     quota_format_percent(pct, sizeof(pct), snap->alert_percent);
     snprintf(generated, sizeof(generated), "快照 %s · 告警 %s", ts, pct);
-    snprintf(selected, sizeof(selected), "%d / 6",
-             snap->providers.grok + snap->providers.claude +
-             snap->providers.codex + snap->providers.kimi +
-             snap->providers.opencode + snap->providers.agy);
+    snprintf(selected, sizeof(selected), "%d / 4",
+             snap->providers.grok + snap->providers.codex +
+             snap->providers.kimi + snap->providers.agy);
 
     draw_card_frame(ui, x, y);
     ui_text(ui, "数据接口", ui->px_card_title, ix, iy, ui->card_inner, ui->line_h,
@@ -365,14 +364,10 @@ static const ProviderQuota *card_quota(const QuotaSnapshot *snap, UiCard id)
     switch (id) {
     case UI_CARD_GROK:
         return &snap->grok;
-    case UI_CARD_CLAUDE:
-        return &snap->claude;
     case UI_CARD_CODEX:
         return &snap->codex;
     case UI_CARD_KIMI:
         return &snap->kimi;
-    case UI_CARD_OPENCODE:
-        return &snap->opencode;
     case UI_CARD_AGY_GEMINI:
         return &snap->agy.gemini;
     case UI_CARD_AGY_THIRD:
@@ -393,19 +388,11 @@ static void card_labels(UiCard id, const char **title, const char **five,
         *title = "Grok";
         *monthly = "月额度";
         break;
-    case UI_CARD_CLAUDE:
-        *title = "Claude Code";
-        break;
     case UI_CARD_CODEX:
         *title = "Codex";
         break;
     case UI_CARD_KIMI:
         *title = "Kimi Code";
-        break;
-    case UI_CARD_OPENCODE:
-        *title = "OpenCode Go";
-        *five = "滚动 5h";
-        *monthly = "月额度";
         break;
     case UI_CARD_AGY_GEMINI:
         *title = "AGY · Gemini";
@@ -702,7 +689,7 @@ static int scaled_metric(const Ui *ui, int logical, int percent, int minimum)
 }
 
 /* Calculate the vertical metrics at a percentage of the normal KOReader-like
- * scale. Four rows fit unmodified on the target 1072x1448 devices. Older
+ * scale. Three rows fit unmodified on the target 1072x1448 devices. Older
  * 600x800 Kindles automatically use a denser but still complete layout. */
 static void configure_vertical_metrics(Ui *ui, int percent)
 {
@@ -723,7 +710,7 @@ static void configure_vertical_metrics(Ui *ui, int percent)
     ui->wb_h = ui->line_h + ui->bar_h + ui->gap3 + ui->line_h;
     ui->card_h = 2 * (ui->card_padding + ui->border) + ui->line_h +
                  3 * ui->gap5 + 3 * ui->wb_h;
-    ui->content_h = 4 * ui->card_h + 4 * ui->row_gap + ui->button_h;
+    ui->content_h = 3 * ui->card_h + 3 * ui->row_gap + ui->button_h;
 }
 
 Ui *ui_create(int fbfd, int screen_w, int screen_h, int dpi, const char *font_path)
