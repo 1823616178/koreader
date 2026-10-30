@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  c-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host unit tests (fixture server is started by make test)
+        run: make -C kindle test
+      - name: Wrapper simulation (fast)
+        run: bash kindle/tests/wrapper_sim.sh
+      # Watchdog simulation is slow by design (it waits out real poll
+      # intervals, several minutes); it still runs here so a regression
+      # in the restore logic is caught before it reaches a device.
+      - name: Watchdog simulation (slow)
+        timeout-minutes: 15
+        run: bash kindle/tests/watchdog_sim.sh
+
+  lua-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build stock Lua (KOReader's luajit is not available here;
+            the plugin code is 5.1-compatible, so 5.4 is a valid check)
+        run: |
+          curl -sL -o /tmp/lua.tar.gz https://www.lua.org/ftp/lua-5.4.7.tar.gz
+          tar xzf /tmp/lua.tar.gz -C /tmp
+          make -C /tmp/lua-5.4.7 linux -j4
+          echo "/tmp/lua-5.4.7/src" >> "$GITHUB_PATH"
+      - name: Syntax-check every Lua file
+        run: |
+          for f in readingquota.koplugin/*.lua smoke.lua tests/test_quotadata.lua; do
+            lua -e "assert(loadfile('$f'))" || exit 1
+          done
+      - name: quotadata unit tests
+        run: lua tests/test_quotadata.lua readingquota.koplugin
+
+  no-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No hardcoded LAN address or real token in the repo
+        run: |
+          # The previous default LAN address must never come back; examples
+          # use loopback (defaults) or a generic 192.168.1.x address instead.
+          # (--exclude=ci.yml keeps this check from matching its own pattern.)
+          ! grep -rnE "123\.161" --exclude-dir=.git --exclude=ci.yml . || exit 1
+          # The shipped Kindle config template may only carry a commented
+          # api_token placeholder, never a value.
+          ! grep -rn "^api_token=[^[:space:]]" kindle/extension/config || exit 1
