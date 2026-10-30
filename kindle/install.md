@@ -156,7 +156,8 @@ touch_mirror_y=0
 
 | 键 | 含义 |
 | --- | --- |
-| `api_url` | 数据接口地址。写 `host`、`host:port` 或完整 URL 都行；可追加 `?providers=grok,codex` |
+| `api_url` | 数据接口地址。写 `host`、`host:port` 或完整 URL 都行；可追加 `?providers=grok,codex`。默认只是本机回环，首次使用请改成你的服务器局域网地址 |
+| `api_token` | 可选 Bearer 令牌（USB 编辑）。服务端要求认证时填写，否则留空；含空白的令牌会被丢弃 |
 | `touch_swap_xy` | 触摸 X/Y 轴交换（0/1），由 `--calibrate` 确定 |
 | `touch_mirror_x` | 触摸 X 轴镜像（0/1） |
 | `touch_mirror_y` | 触摸 Y 轴镜像（0/1） |
@@ -165,7 +166,7 @@ touch_mirror_y=0
 
 应用不再有 `idle_timeout_s`（自动退出）键；旧配置文件里残留的该行会被忽略，下次保存配置时自动删除。
 
-`api_url` 会自动归一化：没有 scheme 补 `http://`、去掉路径尾部斜杠、结尾不是 `/api/usage` 就补上，并保留 query。所以写 `123.161.179.32:46927?providers=grok,codex` 等价于 `http://123.161.179.32:46927/api/usage?providers=grok,codex`。机内数字键盘不能输入工具名，筛选名单请通过 USB 直接编辑此文件。
+`api_url` 会自动归一化：没有 scheme 补 `http://`、去掉路径尾部斜杠、结尾不是 `/api/usage` 就补上，并保留 query。所以写 `192.168.1.100:46927?providers=grok,codex` 等价于 `http://192.168.1.100:46927/api/usage?providers=grok,codex`。机内数字键盘不能输入工具名，筛选名单请通过 USB 直接编辑此文件。
 
 注意：**不支持 https**（没链 TLS 库），接口必须是明文 HTTP。
 

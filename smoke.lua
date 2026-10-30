@@ -30,10 +30,13 @@ local function window(used, reset_hours)
     }
 end
 
-local sample = {
+-- Raw API response shape (what the server sends); fetch() turns it into
+-- the snapshot shape (a providers list) that the page renders.
+local response = {
     displayMode = "used",
     alertPercent = 85,
     generatedAt = os.time() * 1000,
+    grok = { five = window(8, 3), seven = window(25, 120) },
     codex = { five = window(12, 3), seven = window(34, 120) },
     kimi = { five = window(2.4, 2), seven = window(25, 72) },
     agy = {
@@ -42,25 +45,31 @@ local sample = {
     },
 }
 
--- Exercise URL normalization, provider filtering, the actual HTTP sink, JSON
--- decoder and response normalizer without depending on the LAN service.
+-- Exercise URL normalization, the actual HTTP sink, JSON decoder and
+-- response normalizer without depending on the LAN service. No provider
+-- filter is applied anymore: a saved ?providers= query passes through
+-- untouched, and the page shows whatever the response contains.
 QuotaData.settings = {
-    readSetting = function()
+    readSetting = function(_, key)
+        if key == "usage_api_token" then return "" end
         return "http://example.test/base/?foo=1&providers=claude"
     end,
 }
 local real_http_request = http.request
 http.request = function(request)
-    assert(request.url == "http://example.test/base/api/usage?foo=1&providers=codex,kimi,agy")
-    assert(not request.url:find("opencode", 1, true))
-    request.sink(rapidjson.encode(sample))
+    assert(request.url == "http://example.test/base/api/usage?foo=1&providers=claude")
+    request.sink(rapidjson.encode(response))
     request.sink(nil)
     return 1, 200, { ["content-type"] = "application/json" }, "OK"
 end
-local parsed = assert(QuotaData:fetch())
+local sample = assert(QuotaData:fetch())
 http.request = real_http_request
-assert(parsed.codex.five.used == 12)
-assert(parsed.agy.thirdParty.seven == nil)
+assert(#sample.providers == 5)
+assert(sample.providers[1].id == "grok")
+assert(sample.providers[1].windows.five.used == 8)
+assert(sample.providers[2].windows.five.used == 12)
+assert(sample.providers[5].id == "agy.thirdParty")
+assert(sample.providers[5].windows.seven == nil)
 assert(QuotaData.displayValue({ used = 0 }, "used") == 0)
 assert(QuotaData.displayValue({ used = 18 }, "remaining") == 82)
 

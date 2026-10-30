@@ -45,6 +45,13 @@ void http_diag_format(const HttpDiag *d, int wifi_ok, long wifi_ms,
                       char *dst, size_t dst_size);
 
 char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size);
+/* Like http_get, but sends "Authorization: Bearer <token>" when token is a
+ * valid non-empty token (printable ASCII, no spaces, <= 200 chars). A
+ * present-but-malformed token fails the request with errbuf "bad token"
+ * instead of being sent, so a broken config can never leak a partial or
+ * CRLF-injected header. NULL/empty token behaves exactly like http_get. */
+char *http_get_with_auth(const char *url, const char *token,
+                         int *status, char *errbuf, size_t errbuf_size);
 
 /* Cooperative cancel for a in-flight http_get (R06). The GET checks
  * between DNS/connect/recv phases and returns NULL with errbuf

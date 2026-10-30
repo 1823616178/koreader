@@ -1,12 +1,14 @@
 /* Host-side unit tests for the device-independent modules (config/quota/http/input/net).
  *
- * Required server for the http tests: from kindle/tests (which contains the
- * checked-in index.txt fixture), run:
+ * `make test` starts the fixture server itself. When running this binary
+ * directly, first start the server from kindle/tests (which contains the
+ * checked-in index.txt fixture):
  *
  *     python3 -m http.server 18080 --bind 127.0.0.1
  *
- * then run this binary. The 200 case fetches /index.txt; the 404 case
- * fetches /no-such-file.
+ * The 200 case fetches /index.txt; the 404 case fetches /no-such-file.
+ * Without a server the http cases fail -- that is a missing fixture, not
+ * a code failure.
  */
 /* fork/pipe/alarm/waitpid for the input_wait_tap harness under -std=c99. */
 #define _POSIX_C_SOURCE 200809L
@@ -127,10 +129,10 @@ static void test_normalize_url(void)
     char buf[512];
 
     config_normalize_url(buf, sizeof(buf), "");
-    CHECK(strcmp(buf, "http://123.161.179.32:46927/api/usage") == 0);
+    CHECK(strcmp(buf, "http://127.0.0.1:46927/api/usage") == 0);
 
-    config_normalize_url(buf, sizeof(buf), " 123.161.179.32:46927/ ");
-    CHECK(strcmp(buf, "http://123.161.179.32:46927/api/usage") == 0);
+    config_normalize_url(buf, sizeof(buf), " 127.0.0.1:46927/ ");
+    CHECK(strcmp(buf, "http://127.0.0.1:46927/api/usage") == 0);
 
     config_normalize_url(buf, sizeof(buf), "http://h/api/usage");
     CHECK(strcmp(buf, "http://h/api/usage") == 0);
@@ -171,14 +173,14 @@ static void test_config_roundtrip(void)
     FILE *f;
 
     config_defaults(&cfg);
-    CHECK(strcmp(cfg.api_url, "http://123.161.179.32:46927/api/usage") == 0);
+    CHECK(strcmp(cfg.api_url, "http://127.0.0.1:46927/api/usage") == 0);
     CHECK(cfg.touch_swap_xy == 0 && cfg.touch_mirror_x == 0 && cfg.touch_mirror_y == 0);
     CHECK(cfg.wifi_auto_off == CONFIG_WIFI_AUTO_OFF_DEFAULT);
     CHECK(cfg.auto_refresh_min == CONFIG_AUTO_REFRESH_DEFAULT);
 
     /* Missing file: -1, defaults kept. */
     CHECK(config_load(&cfg, "/tmp/aiquota_no_such_file_9f3b2.ini") == -1);
-    CHECK(strcmp(cfg.api_url, "http://123.161.179.32:46927/api/usage") == 0);
+    CHECK(strcmp(cfg.api_url, "http://127.0.0.1:46927/api/usage") == 0);
     CHECK(cfg.touch_swap_xy == 0);
 
     /* Save/load roundtrip with non-default touch flags. */
@@ -1426,8 +1428,57 @@ static void test_http_diag_format(void)
     CHECK(strstr(buf, "dns failed") != NULL);
 }
 
+static void test_api_token(void)
+{
+    const char *path = "/tmp/aiquota_cfg_token.ini";
+    AppConfig cfg;
+    AppConfig back;
+    char err[128];
+    char *body;
+    int status = 0;
+    FILE *f;
+
+    /* Validation: printable, no spaces, bounded. A malformed token must
+     * never reach the wire, even if a hand-edited config contains one. */
+    CHECK(config_token_valid(NULL) == 0);
+    CHECK(config_token_valid("") == 0);
+    CHECK(config_token_valid("test-token_123") == 1);
+    CHECK(config_token_valid("has space") == -1);
+    CHECK(config_token_valid("bad\r\ntoken") == -1);
+
+    /* A malformed token fails before any network activity. */
+    err[0] = '\0';
+    body = http_get_with_auth("http://127.0.0.1:18080/index.txt",
+                              "bad token", &status, err, sizeof(err));
+    CHECK(body == NULL);
+    CHECK(strcmp(err, "bad token") == 0);
+
+    /* Roundtrip: a valid token survives save/load; a malformed one in a
+     * hand-edited file is dropped on load instead of being re-saved. */
+    config_defaults(&cfg);
+    CHECK(cfg.api_token[0] == '\0');
+    snprintf(cfg.api_token, sizeof(cfg.api_token), "%s", "tok_abc-123");
+    CHECK(config_save(&cfg, path) == 0);
+    config_defaults(&back);
+    CHECK(config_load(&back, path) == 0);
+    CHECK(strcmp(back.api_token, "tok_abc-123") == 0);
+
+    f = fopen(path, "w");
+    CHECK(f != NULL);
+    if (f) {
+        fputs("api_url=http://example.com/api/usage\napi_token=bad token\n", f);
+        fclose(f);
+        config_defaults(&back);
+        CHECK(config_load(&back, path) == 0);
+        CHECK(back.api_token[0] == '\0');
+    }
+    unlink(path);
+    unlink("/tmp/aiquota_cfg_token.ini.bak");
+}
+
 int main(void)
 {
+    RUN(test_api_token);
     RUN(test_normalize_url);
     RUN(test_config_roundtrip);
     RUN(test_config_save_atomic);

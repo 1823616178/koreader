@@ -423,6 +423,7 @@ static void paint_loading(int fbfd, Ui *ui, const char *host, const char *api_ur
  * request (R06). The worker only runs http_get; WiFi/parse stay on main. */
 typedef struct {
     const char *url;
+    const char *token; /* optional Bearer token; NULL/empty = no header */
     char *body;
     int status;
     char err[256];
@@ -433,7 +434,8 @@ static void *fetch_job_main(void *arg)
 {
     FetchJob *job = (FetchJob *)arg;
 
-    job->body = http_get(job->url, &job->status, job->err, sizeof(job->err));
+    job->body = http_get_with_auth(job->url, job->token,
+                                   &job->status, job->err, sizeof(job->err));
     job->done = 1;
     return NULL;
 }
@@ -441,7 +443,8 @@ static void *fetch_job_main(void *arg)
 static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
                     QuotaSnapshot *snap, int *have_good, int demo,
                     int auto_refresh_min, int auto_cycle,
-                    char *detail, size_t detail_size, int release_wifi)
+                    char *detail, size_t detail_size, int release_wifi,
+                    const char *token)
 {
     QuotaSnapshot fresh;
     unsigned long long sig;
@@ -468,7 +471,7 @@ static int do_fetch(int fbfd, Ui *ui, const char *api_url, const char *host,
             snprintf(detail, detail_size, "WiFi 未连接");
             sig = frame_sig_of(snap, "失败", detail);
         } else {
-            body = http_get(api_url, &status, errbuf, sizeof(errbuf));
+            body = http_get_with_auth(api_url, token, &status, errbuf, sizeof(errbuf));
             if (!body) {
                 st = ST_ERROR;
                 snprintf(detail, detail_size, "%s", errbuf);
@@ -1040,7 +1043,7 @@ int main(int argc, char **argv)
             if (mode == MODE_DEMO) {
                 st = do_fetch(fbfd, ui, cfg.api_url, host, &snap, &have_good,
                               1, cfg.auto_refresh_min, auto_cycle,
-                              detail, sizeof(detail), 0);
+                              detail, sizeof(detail), 0, cfg.api_token);
                 snprintf(snap_api_url, sizeof(snap_api_url), "%s", cfg.api_url);
             } else {
                 /* Cancelable path (R06): WiFi on main, GET in a worker so
@@ -1051,6 +1054,7 @@ int main(int argc, char **argv)
 
                 memset(&job, 0, sizeof(job));
                 job.url = fetch_url;
+                job.token = cfg.api_token;
                 http_cancel_reset();
                 diag_begin();
                 {
@@ -1070,7 +1074,8 @@ int main(int argc, char **argv)
                     /* Fallback: synchronous GET if threads are unavailable. */
                     st = do_fetch(fbfd, ui, fetch_url, host, &snap, &have_good,
                                   0, cfg.auto_refresh_min, auto_cycle,
-                                  detail, sizeof(detail), cfg.wifi_auto_off);
+                                  detail, sizeof(detail), cfg.wifi_auto_off,
+                                  cfg.api_token);
                     diag_finish(1, wifi_ms, have_good, 0);
                     if (have_good) {
                         apply_display_pref(&snap, &cfg);
@@ -1357,6 +1362,7 @@ handle_action:
                     }
                     memset(&djob, 0, sizeof(djob));
                     djob.url = durl;
+                    djob.token = cfg.api_token;
                     http_cancel_reset();
                     diag_begin();
                     snprintf(dmsg, sizeof(dmsg), "Diagnosing...");

@@ -23,9 +23,28 @@ static char *trim(char *s)
     return s;
 }
 
+/* Bearer token alphabet for a header value: printable ASCII, no spaces, so
+ * a token can never smuggle a CRLF into the request. Returns 1 if the
+ * token may be sent, 0 if absent, -1 if present but malformed. */
+int config_token_valid(const char *token)
+{
+    const unsigned char *p;
+
+    if (!token || !*token)
+        return 0;
+    if (strlen(token) > 200)
+        return -1;
+    for (p = (const unsigned char *)token; *p; p++) {
+        if (*p < 0x21 || *p > 0x7e)
+            return -1;
+    }
+    return 1;
+}
+
 void config_defaults(AppConfig *cfg)
 {
     config_normalize_url(cfg->api_url, sizeof(cfg->api_url), CONFIG_DEFAULT_API_BASE);
+    cfg->api_token[0] = '\0';
     cfg->touch_swap_xy = 0;
     cfg->touch_mirror_x = 0;
     cfg->touch_mirror_y = 0;
@@ -161,6 +180,12 @@ int config_load(AppConfig *cfg, const char *path)
         if (strcmp(key, "api_url") == 0) {
             snprintf(api_url, sizeof(api_url), "%s", value);
             have_url = 1;
+        } else if (strcmp(key, "api_token") == 0) {
+            /* Malformed tokens are dropped, never sent or re-saved. */
+            if (config_token_valid(value) == 1)
+                snprintf(cfg->api_token, sizeof(cfg->api_token), "%s", value);
+            else
+                cfg->api_token[0] = '\0';
         } else if (strcmp(key, "touch_swap_xy") == 0) {
             cfg->touch_swap_xy = atoi(value) ? 1 : 0;
         } else if (strcmp(key, "touch_mirror_x") == 0) {
@@ -227,6 +252,7 @@ int config_save(const AppConfig *cfg, const char *path)
         return -1;
 
     if (fprintf(f, "api_url=%s\n", cfg->api_url) < 0 ||
+        fprintf(f, "api_token=%s\n", cfg->api_token) < 0 ||
         fprintf(f, "touch_swap_xy=%d\n", cfg->touch_swap_xy) < 0 ||
         fprintf(f, "touch_mirror_x=%d\n", cfg->touch_mirror_x) < 0 ||
         fprintf(f, "touch_mirror_y=%d\n", cfg->touch_mirror_y) < 0 ||

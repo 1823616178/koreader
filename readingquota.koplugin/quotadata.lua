@@ -15,8 +15,26 @@ local rapidjson = require("rapidjson")
 local socketutil = require("socketutil")
 
 local SETTINGS_PATH = DataStorage:getSettingsDir() .. "/readingquota.lua"
-local DEFAULT_API_BASE = "http://123.161.179.32:46927"
-local PROVIDER_QUERY = "providers=codex,kimi,agy"
+-- Loopback only: the real server address is a per-device setting, never a
+-- hardcoded LAN address in the repo. Existing devices keep their saved
+-- usage_api_url; fresh installs must set it once (see README).
+local DEFAULT_API_BASE = "http://127.0.0.1:46927"
+
+-- Dynamic provider display: no fixed provider filter is sent, so the
+-- server returns everything it collects and the page shows exactly that.
+-- Known providers keep a stable order and title; anything else the server
+-- returns is shown after them, alphabetically, with a title derived from
+-- its id. A provider counts as "returned" when its object is present in
+-- the response, even if all its windows are null (that still renders a
+-- card saying "暂无数据" rather than silently hiding the provider).
+local KNOWN_ORDER = { "grok", "codex", "kimi" }
+local KNOWN_TITLES = { grok = "Grok", codex = "Codex", kimi = "Kimi Code" }
+local AGY_ORDER = { "gemini", "thirdParty" }
+local AGY_TITLES = { gemini = "AGY · Gemini", thirdParty = "AGY · Claude/GPT" }
+local RESERVED_KEYS = {
+    displayMode = true, alertPercent = true, generatedAt = true,
+    providers = true,
+}
 
 local QuotaData = {}
 
@@ -67,23 +85,6 @@ local function normalizeUrl(value)
     return value .. query
 end
 
-local function withProviderFilter(url)
-    local base, query = url:match("^([^?]+)%?(.*)$")
-    if not base then
-        return url .. "?" .. PROVIDER_QUERY
-    end
-    local parts = {}
-    for item in (query .. "&"):gmatch("(.-)&") do
-        local key = item:match("^([^=]+)")
-        if item ~= "" and key ~= "providers" and key ~= "tools"
-            and key ~= "tool" and key ~= "provider" then
-            table.insert(parts, item)
-        end
-    end
-    table.insert(parts, PROVIDER_QUERY)
-    return base .. "?" .. table.concat(parts, "&")
-end
-
 function QuotaData:getSettings()
     if not self.settings then
         self.settings = LuaSettings:open(SETTINGS_PATH)
@@ -92,8 +93,11 @@ function QuotaData:getSettings()
 end
 
 function QuotaData:getApiUrl()
-    return withProviderFilter(normalizeUrl(
-        self:getSettings():readSetting("usage_api_url", DEFAULT_API_BASE)))
+    -- No provider filter: any ?providers= in a saved URL is passed through
+    -- untouched, so a user who does want to narrow the request can still
+    -- do so by editing the URL, but by default the server decides.
+    return normalizeUrl(
+        self:getSettings():readSetting("usage_api_url", DEFAULT_API_BASE))
 end
 
 function QuotaData:setApiUrl(value)
@@ -104,19 +108,114 @@ function QuotaData:setApiUrl(value)
     return url
 end
 
+-- Optional Bearer token, stored alongside the URL in KOReader's settings
+-- file (same plaintext sensitivity as any other KOReader setting). The
+-- server side must validate it; an unset token means "no Authorization
+-- header", preserving the old unauthenticated behaviour. Tokens containing
+-- whitespace or control characters can never be a valid header value, so
+-- they are treated as unset rather than sent.
+local function validToken(value)
+    value = trim(type(value) == "string" and value or "")
+    if value == "" or value:find("%s") or value:find("%c") then
+        return nil
+    end
+    return value
+end
+
+function QuotaData:getApiToken()
+    return validToken(self:getSettings():readSetting("usage_api_token", ""))
+end
+
+function QuotaData:setApiToken(value)
+    local token = validToken(value)
+    local settings = self:getSettings()
+    if token then
+        settings:saveSetting("usage_api_token", token)
+    elseif settings.delSetting then
+        settings:delSetting("usage_api_token")
+    else
+        -- Older luasettings without delSetting: an empty value reads back
+        -- as unset through validToken, so this is equivalent.
+        settings:saveSetting("usage_api_token", "")
+    end
+    settings:flush()
+    return token ~= nil
+end
+
+local function providerTitle(id)
+    return KNOWN_TITLES[id] or (id:sub(1, 1):upper() .. id:sub(2))
+end
+
+local function sortedKeys(value)
+    local keys = {}
+    for key in pairs(value) do
+        table.insert(keys, key)
+    end
+    table.sort(keys)
+    return keys
+end
+
+--- Flatten one response into an ordered provider list. Each entry is
+-- { id, title, windows = { five, seven } }, ready for the page to render
+-- as one card. AGY is a container, not a provider with windows of its
+-- own: it expands into its sub-providers, unless a future response gives
+-- AGY five/seven windows directly, in which case it stays a single card.
+local function buildProviders(decoded)
+    local providers = {}
+    local function add(id, title, raw)
+        if type(raw) == "table" then
+            table.insert(providers, {
+                id = id, title = title, windows = providerWindows(raw),
+            })
+        end
+    end
+
+    for _, id in ipairs(KNOWN_ORDER) do
+        add(id, KNOWN_TITLES[id], decoded[id])
+    end
+
+    local agy = decoded.agy
+    if type(agy) == "table" then
+        if type(agy.five) == "table" or type(agy.seven) == "table" then
+            add("agy", "AGY", agy)
+        else
+            for _, sub in ipairs(AGY_ORDER) do
+                add("agy." .. sub, AGY_TITLES[sub], agy[sub])
+            end
+            for _, sub in ipairs(sortedKeys(agy)) do
+                if sub ~= "gemini" and sub ~= "thirdParty" then
+                    add("agy." .. sub, "AGY · " .. providerTitle(sub), agy[sub])
+                end
+            end
+        end
+    end
+
+    for _, id in ipairs(sortedKeys(decoded)) do
+        if not RESERVED_KEYS[id] and id ~= "agy" and not KNOWN_TITLES[id] then
+            add(id, providerTitle(id), decoded[id])
+        end
+    end
+    return providers
+end
+
 --- Fetch and validate one aggregate usage snapshot.
 -- Returns normalized data, or nil plus a concise user-facing error.
 function QuotaData:fetch()
     local sink = {}
+    local headers = {
+        ["Accept"] = "application/json",
+        ["Cache-Control"] = "no-cache",
+    }
+    local token = self:getApiToken()
+    if token then
+        headers["Authorization"] = "Bearer " .. token
+    end
     socketutil:set_timeout(45, 50)
     local ok, request_ok, code, _, status = pcall(function()
         return http.request{
             url = self:getApiUrl(),
             method = "GET",
-            headers = {
-                ["Accept"] = "application/json",
-                ["Cache-Control"] = "no-cache",
-            },
+            headers = headers,
             sink = socketutil.table_sink(sink),
         }
     end)
@@ -137,32 +236,24 @@ function QuotaData:fetch()
         return nil, "响应不是有效 JSON：" .. tostring(decode_err or "未知错误")
     end
 
-    local agy = type(decoded.agy) == "table" and decoded.agy or {}
     return {
         displayMode = decoded.displayMode == "remaining" and "remaining" or "used",
         alertPercent = type(decoded.alertPercent) == "number" and clamp(decoded.alertPercent) or 85,
         generatedAt = type(decoded.generatedAt) == "number" and decoded.generatedAt or nil,
-        codex = providerWindows(decoded.codex),
-        kimi = providerWindows(decoded.kimi),
-        agy = {
-            gemini = providerWindows(agy.gemini),
-            thirdParty = providerWindows(agy.thirdParty),
-        },
+        providers = buildProviders(decoded),
     }
 end
 
 function QuotaData.emptySnapshot()
-    local empty = { five = nil, seven = nil }
+    -- No provider cards yet: the loading state shows only the info tile
+    -- (which says "连接中"), not placeholder tiles for providers that may
+    -- never arrive. A fresh list each call, so callers cannot mutate a
+    -- shared snapshot.
     return {
         displayMode = "used",
         alertPercent = 85,
         generatedAt = nil,
-        codex = empty,
-        kimi = empty,
-        agy = {
-            gemini = { five = nil, seven = nil },
-            thirdParty = { five = nil, seven = nil },
-        },
+        providers = {},
     }
 end
 
