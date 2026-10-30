@@ -296,7 +296,7 @@ int config_save(const AppConfig *cfg, const char *path)
     return 0;
 }
 
-int config_cache_save(const char *path, const char *api_url,
+int config_cache_save(const char *path, const char *api_url, const char *api_token,
                       const char *json_body, long long saved_at_ms)
 {
     char tmp[768];
@@ -305,6 +305,10 @@ int config_cache_save(const char *path, const char *api_url,
 
     if (!path || !api_url || !json_body)
         return -1;
+    if (config_token_valid(api_token) != 0) {
+        unlink(path);
+        return -1;
+    }
     plen = strlen(path);
     if (plen + 5 >= sizeof(tmp))
         return -1;
@@ -312,7 +316,7 @@ int config_cache_save(const char *path, const char *api_url,
     f = fopen(tmp, "w");
     if (!f)
         return -1;
-    if (fprintf(f, "api_url=%s\n", api_url) < 0 ||
+    if (fprintf(f, "cache_version=2\napi_url=%s\n", api_url) < 0 ||
         fprintf(f, "saved_at=%lld\n", saved_at_ms) < 0 ||
         fprintf(f, "json=\n%s", json_body) < 0 ||
         fflush(f) != 0) {
@@ -336,7 +340,7 @@ int config_cache_save(const char *path, const char *api_url,
     return 0;
 }
 
-int config_cache_load(const char *path, const char *api_url,
+int config_cache_load(const char *path, const char *api_url, const char *api_token,
                       char *json_out, size_t json_out_size,
                       long long *saved_at_ms)
 {
@@ -344,18 +348,22 @@ int config_cache_load(const char *path, const char *api_url,
     char line[768];
     char file_url[768]; /* same bound as line[], minus the 8-byte prefix */
     long long saved = 0;
-    int have_url = 0, have_json = 0;
+    int have_url = 0, have_json = 0, have_version = 0;
     size_t jlen = 0;
 
     if (!path || !api_url || !json_out || json_out_size < 2)
         return -1;
     json_out[0] = '\0';
+    if (config_token_valid(api_token) != 0)
+        return -1;
     f = fopen(path, "r");
     if (!f)
         return -1;
     file_url[0] = '\0';
     while (fgets(line, sizeof(line), f)) {
-        if (!have_json && strncmp(line, "api_url=", 8) == 0) {
+        if (!have_json && strcmp(line, "cache_version=2\n") == 0) {
+            have_version = 1;
+        } else if (!have_json && strncmp(line, "api_url=", 8) == 0) {
             snprintf(file_url, sizeof(file_url), "%s", line + 8);
             {
                 size_t L = strlen(file_url);
@@ -384,7 +392,7 @@ int config_cache_load(const char *path, const char *api_url,
         }
     }
     fclose(f);
-    if (!have_url || !have_json || strcmp(file_url, api_url) != 0)
+    if (!have_version || !have_url || !have_json || strcmp(file_url, api_url) != 0)
         return -1;
     if (saved_at_ms)
         *saved_at_ms = saved;

@@ -34,11 +34,11 @@ jobs:
           echo "/tmp/lua-5.4.7/src" >> "$GITHUB_PATH"
       - name: Syntax-check every Lua file
         run: |
-          for f in readingquota.koplugin/*.lua smoke.lua tests/test_quotadata.lua; do
+          for f in readingquota.koplugin/*.lua smoke.lua tests/*.lua; do
             lua -e "assert(loadfile('$f'))" || exit 1
           done
-      - name: quotadata unit tests
-        run: lua tests/test_quotadata.lua readingquota.koplugin
+      - name: Plugin unit tests
+        run: ./dev.sh test
 
   no-secrets:
     runs-on: ubuntu-latest

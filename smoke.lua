@@ -36,7 +36,7 @@ local response = {
     displayMode = "used",
     alertPercent = 85,
     generatedAt = os.time() * 1000,
-    grok = { five = window(8, 3), seven = window(25, 120) },
+    grok = { five = window(8, 3), seven = window(25, 120), monthly = window(35, 600) },
     codex = { five = window(12, 3), seven = window(34, 120) },
     kimi = { five = window(2.4, 2), seven = window(25, 72) },
     agy = {
@@ -67,6 +67,7 @@ http.request = real_http_request
 assert(#sample.providers == 5)
 assert(sample.providers[1].id == "grok")
 assert(sample.providers[1].windows.five.used == 8)
+assert(sample.providers[1].windows.monthly.used == 35)
 assert(sample.providers[2].windows.five.used == 12)
 assert(sample.providers[5].id == "agy.thirdParty")
 assert(sample.providers[5].windows.seven == nil)

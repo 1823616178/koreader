@@ -23,11 +23,10 @@ Rule: show exactly what the API returns, no fixed provider list.
   order, always ending with the info card. A brand-new provider id that
   the Kindle structs do not know will not appear there -- that client
   would need a struct/card addition, whereas the plugin needs none.
-- Practical limit: the page is one fullscreen, unscrollable layout. A
-  handful of providers fits comfortably; if the server ever returns a
-  dozen, the grid will outgrow the screen. That is a known limit, not a
-  silent filter: the fix would be pagination or scrolling, not dropping
-  providers.
+- The KOReader grid paginates to fit the screen height, with **上一页** /
+  **下一页** buttons when needed. Refresh, URL, token and close controls
+  remain visible on every page. Monthly windows, including Grok's, are
+  displayed when present.
 
 ## API endpoint defaults
 
@@ -51,12 +50,14 @@ clients only implement the client side of the contract:
 - If a token is configured, the client sends
   `Authorization: Bearer <token>` on every `/api/usage` request.
 - If no token is configured, no header is sent (old behaviour).
-- Tokens are printable ASCII without spaces (max 200 chars on the
-  Kindle client); a token with whitespace or control characters is
+- Tokens are printable ASCII without spaces (max 200 chars on both
+  clients); a token with whitespace, non-ASCII or control characters is
   rejected and never sent, so it cannot inject a header line.
 - KOReader: set/clear it with the **令牌** button on the page. The
   stored token is never echoed back on screen; leaving the field empty
-  clears it.
+  clears it. Invalid input keeps the previous token and shows an error.
+  Saving either URL or token clears the previous snapshot and schedules
+  a new request, even when a fetch is already in progress.
 - Kindle: set `api_token` in `extension/config` over USB. The on-device
   keypad cannot type token characters. The token is stored in plaintext
   in that device-only file, like the rest of the config.
@@ -64,6 +65,10 @@ clients only implement the client side of the contract:
   token when one is required and answer `401` otherwise. Clients already
   treat any non-200 status as a fetch failure and keep the last good
   snapshot.
+- Kindle disk caching is available only without a configured token.
+  Authenticated snapshots stay in memory for the current session; changing
+  tokens cannot load another account's persisted quotas. Legacy caches
+  from before this policy are ignored.
 
 ## Security limits, stated plainly
 

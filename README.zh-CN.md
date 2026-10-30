@@ -2,7 +2,7 @@
 
 *[English](README.md)*
 
-一个紧凑的 KOReader 全屏面板，通过 Usage API 显示接口返回的每一个提供商的 5 小时与周额度：Grok、Codex、Kimi Code、Antigravity（Gemini、Claude/GPT），以及服务端未来采集的其他工具。卡片按两列排列，所有内容完整显示在同一页，不需要滚动或翻页。每个额度窗口包含百分比、分段进度条和预计重置时间；达到接口返回的 `alertPercent` 时会显示 `!`。
+一个紧凑的 KOReader 全屏面板，通过 Usage API 显示接口返回的每一个提供商的 5 小时、周额度及可用的月额度：Grok、Codex、Kimi Code、Antigravity（Gemini、Claude/GPT），以及服务端未来采集的其他工具。卡片按两列排列，超出屏幕时自动分页，操作按钮始终可见。每个额度窗口包含百分比、分段进度条和预计重置时间；达到接口返回的 `alertPercent` 时会显示 `!`。
 
 ![](preview-partial.png)
 
@@ -42,7 +42,7 @@ http://127.0.0.1:46927/api/usage
 
 ```sh
 ./dev.sh check   # 使用 KOReader 自带 LuaJIT 检查语法
-./dev.sh test    # quotadata 单元测试（tests/test_quotadata.lua）
+./dev.sh test    # 数据、鉴权及页面状态单元测试
 ./dev.sh link    # 链接到模拟器插件目录
 ./dev.sh smoke   # 渲染加载、已用、剩余和错误状态
 ./dev.sh run     # 启动 KOReader 模拟器

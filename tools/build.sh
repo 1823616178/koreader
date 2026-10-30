@@ -24,20 +24,8 @@ make -C "$ROOT/kindle"
     die "make finished but kindle/extension/bin/aiquota is missing"
 
 # --- host unit tests ---------------------------------------------------------
-# The http cases need the fixture server from tests/test_main.c's header:
-# 127.0.0.1:18080 serving kindle/tests (index.txt). A busy port means no
-# fixture, and failing the build is the right outcome then.
-PYTHON=$(command -v python3 || true)
-[ -n "$PYTHON" ] || PYTHON="$HOME/fontenv/bin/python3"
-[ -x "$(command -v "$PYTHON" 2>/dev/null || echo "$PYTHON")" ] || die "python3 not found"
-command -v gcc >/dev/null 2>&1 || die "host gcc not found (make test needs it)"
-"$PYTHON" -m http.server 18080 --bind 127.0.0.1 -d "$ROOT/kindle/tests" >/dev/null 2>&1 &
-TEST_SRV=$!
-trap '[ "$TEST_SRV" ] && kill "$TEST_SRV" 2>/dev/null' EXIT
-sleep 1
+# make test owns an isolated fixture server and cleans it up on exit.
 make -C "$ROOT/kindle" test || die "host unit tests failed"
-kill "$TEST_SRV" 2>/dev/null
-TEST_SRV=
 
 # --- font subset -----------------------------------------------------------
 [ -f "$ROOT/kindle/fonts/NotoSansSC.ttf" ] || \

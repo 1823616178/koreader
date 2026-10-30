@@ -61,6 +61,7 @@ local function providerWindows(provider)
     return {
         five = validWindow(provider.five),
         seven = validWindow(provider.seven),
+        monthly = validWindow(provider.monthly),
     }
 end
 
@@ -112,11 +113,10 @@ end
 -- file (same plaintext sensitivity as any other KOReader setting). The
 -- server side must validate it; an unset token means "no Authorization
 -- header", preserving the old unauthenticated behaviour. Tokens containing
--- whitespace or control characters can never be a valid header value, so
--- they are treated as unset rather than sent.
+-- anything outside printable ASCII are never sent.
 local function validToken(value)
-    value = trim(type(value) == "string" and value or "")
-    if value == "" or value:find("%s") or value:find("%c") then
+    if type(value) ~= "string" or value == "" or #value > 200
+        or value:find("[^\033-\126]") then
         return nil
     end
     return value
@@ -127,7 +127,13 @@ function QuotaData:getApiToken()
 end
 
 function QuotaData:setApiToken(value)
+    if type(value) ~= "string" then
+        return false, "令牌须为不含空格的可打印 ASCII 字符，最多 200 字符"
+    end
     local token = validToken(value)
+    if value ~= "" and not token then
+        return false, "令牌须为不含空格的可打印 ASCII 字符，最多 200 字符"
+    end
     local settings = self:getSettings()
     if token then
         settings:saveSetting("usage_api_token", token)
@@ -139,7 +145,7 @@ function QuotaData:setApiToken(value)
         settings:saveSetting("usage_api_token", "")
     end
     settings:flush()
-    return token ~= nil
+    return true
 end
 
 local function providerTitle(id)
@@ -149,14 +155,16 @@ end
 local function sortedKeys(value)
     local keys = {}
     for key in pairs(value) do
-        table.insert(keys, key)
+        if type(key) == "string" then
+            table.insert(keys, key)
+        end
     end
     table.sort(keys)
     return keys
 end
 
 --- Flatten one response into an ordered provider list. Each entry is
--- { id, title, windows = { five, seven } }, ready for the page to render
+-- { id, title, windows = { five, seven, monthly } }, ready for the page to render
 -- as one card. AGY is a container, not a provider with windows of its
 -- own: it expands into its sub-providers, unless a future response gives
 -- AGY five/seven windows directly, in which case it stays a single card.
@@ -176,7 +184,7 @@ local function buildProviders(decoded)
 
     local agy = decoded.agy
     if type(agy) == "table" then
-        if type(agy.five) == "table" or type(agy.seven) == "table" then
+        if agy.five ~= nil or agy.seven ~= nil or agy.monthly ~= nil then
             add("agy", "AGY", agy)
         else
             for _, sub in ipairs(AGY_ORDER) do
@@ -234,6 +242,15 @@ function QuotaData:fetch()
     end
     if type(decoded) ~= "table" then
         return nil, "响应不是有效 JSON：" .. tostring(decode_err or "未知错误")
+    end
+    local mt = getmetatable(decoded)
+    if type(mt) == "table" and mt.__jsontype == "array" then
+        return nil, "响应必须是用量对象，不能是数组"
+    end
+    for key in pairs(decoded) do
+        if type(key) ~= "string" then
+            return nil, "响应必须是用量对象，不能是数组"
+        end
     end
 
     return {

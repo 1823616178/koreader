@@ -104,7 +104,8 @@ decode_result = {
     displayMode = "used",
     alertPercent = 150, -- clamped to 100
     generatedAt = 1785695952333,
-    grok = { five = { used = 0, resetAt = 1785712676000 }, seven = nil },
+    grok = { five = { used = 0, resetAt = 1785712676000 }, seven = nil,
+        monthly = { used = 35 } },
     codex = { five = { used = 12, resetAt = 1785712676000 }, seven = { used = 34 } },
     kimi = { five = nil, seven = nil },
     agy = {
@@ -122,6 +123,8 @@ check(snap.providers[1].windows.five.used == 0,
     "grok used=0 is valid, not treated as missing")
 check(snap.providers[1].windows.seven == nil,
     "grok missing seven window stays nil")
+check(snap.providers[1].windows.monthly.used == 35,
+    "grok monthly window is preserved")
 check(snap.providers[3].id == "kimi",
     "provider with no windows still gets a card")
 check(snap.providers[4].id == "agy.gemini"
@@ -171,8 +174,17 @@ reset()
 check(QuotaData:setApiToken("has space") == false, "token with space is rejected")
 check(QuotaData:getApiToken() == nil, "rejected token is not stored")
 check(QuotaData:setApiToken("ok-token") == true, "valid token is accepted")
-check(QuotaData:setApiToken("") == false, "empty token clears the setting")
+for _, token in ipairs({ "has space", "bad\r\ntoken", "令牌", string.rep("a", 201) }) do
+    check(QuotaData:setApiToken(token) == false, "malformed token is rejected")
+    check(QuotaData:getApiToken() == "ok-token", "invalid input keeps saved credentials")
+end
+check(QuotaData:setApiToken(string.rep("a", 200)), "200-byte token is accepted")
+check(QuotaData:setApiToken("") == true, "empty token clears the setting")
 check(QuotaData:getApiToken() == nil, "cleared token reads back as nil")
+reset({ usage_api_token = "令牌" })
+decode_result = {}
+QuotaData:fetch()
+check(captured.headers["Authorization"] == nil, "invalid saved token is never sent")
 
 -- 6. Non-200 and non-table responses are errors, not snapshots.
 reset()
@@ -184,6 +196,19 @@ reset()
 decode_result = "not-a-table"
 snap, err = QuotaData:fetch()
 check(snap == nil and err ~= nil, "non-table JSON is an error, not a snapshot")
+for _, response in ipairs({ { {} }, { codex = {}, [1] = {} },
+    setmetatable({}, { __jsontype = "array" }) }) do
+    decode_result = response
+    snap, err = QuotaData:fetch()
+    check(snap == nil and err ~= nil, "array response is an error, not a crash")
+end
+decode_result = { agy = { {}, gemini = {}, thirdParty = {} } }
+snap = QuotaData:fetch()
+check(#snap.providers == 2, "numeric AGY keys are ignored safely")
+decode_result = { agy = { monthly = { used = 20 } } }
+snap = QuotaData:fetch()
+check(#snap.providers == 1 and snap.providers[1].windows.monthly.used == 20,
+    "AGY with only a monthly window stays a single card")
 
 -- 7. Formatting helpers and the empty snapshot (no cards while loading).
 reset()

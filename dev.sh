@@ -1,7 +1,7 @@
 #!/bin/sh
 # Dev helpers for the readingquota plugin, run inside WSL.
 #   ./dev.sh check   -- syntax-check every Lua file with KOReader's own luajit
-#   ./dev.sh test    -- quotadata unit tests (KOReader luajit, else any lua)
+#   ./dev.sh test    -- plugin unit tests (KOReader luajit, else any lua)
 #   ./dev.sh link    -- symlink the plugin into the emulator's user plugin dir
 #   ./dev.sh smoke   -- render every page state to preview-*.png without clicking
 #   ./dev.sh run     -- launch the KOReader emulator
@@ -44,6 +44,10 @@ test)
         exit 1
     fi
     "$LUA_BIN" "$ROOT_DIR/tests/test_quotadata.lua" "$SRC_DIR"
+    data_rc=$?
+    "$LUA_BIN" "$ROOT_DIR/tests/test_quotapage.lua" "$SRC_DIR"
+    page_rc=$?
+    [ "$data_rc" -eq 0 ] && [ "$page_rc" -eq 0 ]
     ;;
 link)
     mkdir -p "$USER_DIR/plugins"

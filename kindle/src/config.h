@@ -71,10 +71,11 @@ int  config_clamp_auto_refresh(int mins);
 int  config_clamp_light_idle(int mins);
 /* F07: bump old configs to CONFIG_VERSION_CURRENT; returns 1 if mutated. */
 int  config_migrate(AppConfig *cfg);
-/* F01: atomic JSON snapshot cache bound to api_url. */
-int  config_cache_save(const char *path, const char *api_url,
+/* F01: atomic JSON snapshot cache bound to api_url. Authenticated responses
+ * stay in memory only, so switching credentials never reuses another account. */
+int  config_cache_save(const char *path, const char *api_url, const char *api_token,
                       const char *json_body, long long saved_at_ms);
-int  config_cache_load(const char *path, const char *api_url,
+int  config_cache_load(const char *path, const char *api_url, const char *api_token,
                       char *json_out, size_t json_out_size,
                       long long *saved_at_ms);
 

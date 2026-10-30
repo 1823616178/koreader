@@ -2,7 +2,7 @@
 
 *[简体中文](README.zh-CN.md)*
 
-A compact, full-screen KOReader plugin that reads the aggregate Usage API and shows one tile per provider the API returns -- Grok, Codex, Kimi Code, Antigravity (Gemini plus Claude/GPT), or anything else the server collects -- in a two-column grid without scrolling or pagination. Each quota window shows its percentage, a segmented e-ink-friendly bar, and reset time.
+A compact, full-screen KOReader plugin that reads the aggregate Usage API and shows one tile per provider the API returns -- Grok, Codex, Kimi Code, Antigravity (Gemini plus Claude/GPT), or anything else the server collects -- in a two-column grid. Large grids paginate to fit the screen, keeping the controls accessible. Each quota window, including monthly quotas when returned, shows its percentage, a segmented e-ink-friendly bar, and reset time.
 
 ![](preview-partial.png)
 
@@ -24,7 +24,7 @@ With KOReader installed at `/usr/lib/koreader` under WSL:
 
 ```sh
 ./dev.sh check   # syntax-check with KOReader's luajit
-./dev.sh test    # quotadata unit tests (tests/test_quotadata.lua)
+./dev.sh test    # data, authentication and page-state unit tests
 ./dev.sh link
 ./dev.sh smoke
 ./dev.sh run

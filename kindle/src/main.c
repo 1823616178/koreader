@@ -961,7 +961,7 @@ int main(int argc, char **argv)
         char cached[8192];
         long long saved_at = 0;
 
-        if (config_cache_load(CONFIG_CACHE_PATH, fetch_url, cached,
+        if (config_cache_load(CONFIG_CACHE_PATH, fetch_url, cfg.api_token, cached,
                               sizeof(cached), &saved_at) == 0) {
             QuotaSnapshot fresh;
             if (quota_parse_snapshot(cached, &fresh) == 0) {
@@ -1141,7 +1141,7 @@ int main(int argc, char **argv)
                             snprintf(detail, sizeof(detail), "%s", fetch_url);
                             snprintf(snap_api_url, sizeof(snap_api_url), "%s",
                                      fetch_url);
-                            (void)config_cache_save(CONFIG_CACHE_PATH, fetch_url,
+                            (void)config_cache_save(CONFIG_CACHE_PATH, fetch_url, cfg.api_token,
                                                     job.body,
                                                     (long long)time(NULL) * 1000LL);
                         }
@@ -1382,7 +1382,8 @@ handle_action:
                                                   &djob) != 0) {
                             int stcode = 0;
                             char err[256];
-                            char *body = http_get(durl, &stcode, err, sizeof(err));
+                            char *body = http_get_with_auth(durl, cfg.api_token,
+                                                           &stcode, err, sizeof(err));
                             int jok = 0;
                             if (body) {
                                 QuotaSnapshot tmp;

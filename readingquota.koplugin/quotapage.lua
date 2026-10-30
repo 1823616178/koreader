@@ -6,7 +6,7 @@ connection-status tile fills the last slot when the provider count is odd,
 and takes a full-width row of its own when it is even (including zero
 providers, e.g. while loading or when the first fetch failed). The Kindle
 client packs its cards the same way from the response, within its known
-provider set.
+provider set. Tall grids use pages so the controls remain on screen.
 
 @module koplugin.ReadingQuota.QuotaPage
 --]]--
@@ -23,6 +23,7 @@ local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local InputDialog = require("ui/widget/inputdialog")
+local InfoMessage = require("ui/widget/infomessage")
 local LeftContainer = require("ui/widget/container/leftcontainer")
 local LineWidget = require("ui/widget/linewidget")
 local RightContainer = require("ui/widget/container/rightcontainer")
@@ -135,29 +136,34 @@ end
 
 function QuotaPage:buildCard(title, windows)
     local mode_label = self.snapshot.displayMode == "remaining" and "剩余" or "已用"
+    local contents = {
+        align = "left",
+        HorizontalGroup:new{
+            LeftContainer:new{
+                dimen = Geom:new{ w = math.floor(self.card_inner_width * 0.72), h = self.line_height },
+                textWidget(title, self.face_card_title, math.floor(self.card_inner_width * 0.72)),
+            },
+            RightContainer:new{
+                dimen = Geom:new{ w = math.ceil(self.card_inner_width * 0.28), h = self.line_height },
+                textWidget(mode_label, self.face_detail, math.ceil(self.card_inner_width * 0.28)),
+            },
+        },
+        VerticalSpan:new{ width = Screen:scaleBySize(5) },
+        self:buildWindow("5 小时", windows.five),
+        VerticalSpan:new{ width = Screen:scaleBySize(5) },
+        self:buildWindow("周额度", windows.seven),
+    }
+    if windows.monthly then
+        table.insert(contents, VerticalSpan:new{ width = Screen:scaleBySize(5) })
+        table.insert(contents, self:buildWindow("月额度", windows.monthly))
+    end
     return FrameContainer:new{
         width = self.card_width,
         bordersize = Size.border.thin,
         padding = self.card_padding,
         margin = 0,
         background = Blitbuffer.COLOR_WHITE,
-        VerticalGroup:new{
-            align = "left",
-            HorizontalGroup:new{
-                LeftContainer:new{
-                    dimen = Geom:new{ w = math.floor(self.card_inner_width * 0.72), h = self.line_height },
-                    textWidget(title, self.face_card_title, math.floor(self.card_inner_width * 0.72)),
-                },
-                RightContainer:new{
-                    dimen = Geom:new{ w = math.ceil(self.card_inner_width * 0.28), h = self.line_height },
-                    textWidget(mode_label, self.face_detail, math.ceil(self.card_inner_width * 0.28)),
-                },
-            },
-            VerticalSpan:new{ width = Screen:scaleBySize(5) },
-            self:buildWindow("5 小时", windows.five),
-            VerticalSpan:new{ width = Screen:scaleBySize(5) },
-            self:buildWindow("周额度", windows.seven),
-        },
+        VerticalGroup:new(contents),
     }
 end
 
@@ -253,7 +259,7 @@ function QuotaPage:buildButtons()
     }
 end
 
-function QuotaPage:buildContent()
+function QuotaPage:buildContent(body_height)
     local providers = self.snapshot.providers or {}
     local cards = {}
     for _, provider in ipairs(providers) do
@@ -265,26 +271,77 @@ function QuotaPage:buildContent()
     local function newGap()
         return VerticalSpan:new{ width = self.card_gap }
     end
-    local children = { align = "center" }
+    local rows = {}
     local i = 1
     while i <= #cards do
         if i == #cards then
             -- Odd one out shares its row with the narrow info tile.
-            table.insert(children, self:buildCardRow(
+            table.insert(rows, self:buildCardRow(
                 cards[i], self:buildInfoCard(self.card_width)))
         else
-            table.insert(children, self:buildCardRow(cards[i], cards[i + 1]))
+            table.insert(rows, self:buildCardRow(cards[i], cards[i + 1]))
         end
-        table.insert(children, newGap())
         i = i + 2
     end
     if #cards % 2 == 0 then
         -- Even count (including zero): the info tile gets its own row.
-        table.insert(children, self:buildInfoCard(self.content_width))
+        table.insert(rows, self:buildInfoCard(self.content_width))
+    end
+    local buttons = self:buildButtons()
+    local available = body_height - buttons:getSize().h - self.card_gap
+    local total = 0
+    for _, row in ipairs(rows) do
+        total = total + row:getSize().h + self.card_gap
+    end
+    local pages = { {} }
+    local nav
+    if total > available then
+        -- Reserve navigation and controls before packing rows, so every
+        -- provider stays reachable on a small screen or a large response.
+        nav = ButtonTable:new{
+            width = self.content_width,
+            show_parent = self,
+            buttons = { {
+                { text = "上一页", callback = function() self:changePage(-1) end },
+                { text = "下一页", callback = function() self:changePage(1) end },
+            } },
+        }
+        available = available - nav:getSize().h - self.card_gap
+    end
+    local used = 0
+    for _, row in ipairs(rows) do
+        local height = row:getSize().h + self.card_gap
+        if used > 0 and used + height > available then
+            table.insert(pages, {})
+            used = 0
+        end
+        table.insert(pages[#pages], row)
+        used = used + height
+    end
+    self.page_count = #pages
+    self.page_index = math.max(1, math.min(self.page_index or 1, #pages))
+    local children = { align = "center" }
+    for page_index, page_rows in ipairs(pages) do
+        for _, row in ipairs(page_rows) do
+            if page_index == self.page_index then
+                table.insert(children, row)
+                table.insert(children, newGap())
+            else
+                row:free()
+            end
+        end
+    end
+    if nav then
+        table.insert(children, nav)
         table.insert(children, newGap())
     end
-    table.insert(children, self:buildButtons())
+    table.insert(children, buttons)
     return VerticalGroup:new(children)
+end
+
+function QuotaPage:changePage(delta)
+    self.page_index = ((self.page_index or 1) - 1 + delta) % self.page_count + 1
+    self:rebuild()
 end
 
 function QuotaPage:buildLayout()
@@ -313,7 +370,7 @@ function QuotaPage:buildLayout()
             self.title_bar,
             CenterContainer:new{
                 dimen = Geom:new{ w = self.width, h = body_height },
-                self:buildContent(),
+                self:buildContent(body_height),
             },
         },
     }
@@ -342,6 +399,12 @@ function QuotaPage:performFetch()
     if self.closed then
         return
     end
+    if self.refresh_pending then
+        self.refresh_pending = nil
+        self.loading = false
+        self:refresh()
+        return
+    end
     if snapshot then
         self.snapshot = snapshot
         self.error_text = nil
@@ -352,8 +415,15 @@ function QuotaPage:performFetch()
     self:rebuild()
 end
 
-function QuotaPage:refresh()
+function QuotaPage:refresh(settings_changed)
+    if settings_changed then
+        self.snapshot = QuotaData.emptySnapshot()
+        self.page_index = 1
+    end
     if self.loading then
+        if settings_changed then
+            self.refresh_pending = true
+        end
         return
     end
     self.loading = true
@@ -382,7 +452,7 @@ function QuotaPage:editApiUrl()
                     callback = function()
                         QuotaData:setApiUrl(dialog:getInputText())
                         UIManager:close(dialog)
-                        self:refresh()
+                        self:refresh(true)
                     end,
                 },
             },
@@ -410,9 +480,13 @@ function QuotaPage:editApiToken()
                     text = "保存并刷新",
                     is_enter_default = true,
                     callback = function()
-                        QuotaData:setApiToken(dialog:getInputText())
+                        local ok, err = QuotaData:setApiToken(dialog:getInputText())
+                        if not ok then
+                            UIManager:show(InfoMessage:new{ text = err })
+                            return
+                        end
                         UIManager:close(dialog)
-                        self:refresh()
+                        self:refresh(true)
                     end,
                 },
             },
