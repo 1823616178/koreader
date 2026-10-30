@@ -24,7 +24,7 @@ kindle/
     bin/aiquota     构建产物（ARM 单二进制）
   scriptlet/      书库入口 ai-quota.sh，部署到 /mnt/us/documents/
   tests/          host 单测（test_main.c）+ 包装脚本 / 看门狗的 WSL 模拟测试
-  Makefile        交叉编译入口（make test 跑 host 单测）
+  Makefile        交叉编译入口（make test 跑 host 单测，并自带 fixture 服务器）
 tools/
   build.sh        一键：编译 + 裁字体子集 + 校验 + 打包 dist/aiquota-kindle.tar.gz
 ```
@@ -109,7 +109,8 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 
 | 键 | 含义 |
 | --- | --- |
-| `api_url` | 数据接口地址。可以写 `host`、`host:port` 或完整 URL |
+| `api_url` | 数据接口地址。可以写 `host`、`host:port` 或完整 URL；默认只是本机回环，真实局域网地址请在设备上设置一次 |
+| `api_token` | 可选 Bearer 令牌（USB 编辑，机内键盘无法输入）。设置后每次请求带 `Authorization: Bearer <token>`；留空则不发该头。服务端需自行校验，详见 `../docs/providers.md` |
 | `touch_swap_xy` | 触摸坐标交换 X/Y 轴（0/1），由 `--calibrate` 确定 |
 | `touch_mirror_x` | 触摸 X 轴镜像（0/1） |
 | `touch_mirror_y` | 触摸 Y 轴镜像（0/1） |
@@ -123,7 +124,7 @@ tar -xzf /mnt/us/aiquota-kindle.tar.gz -C /mnt/us
 
 旧版本配置文件里的 `idle_timeout_s` 行会被当作未知键忽略，下次从设置页保存配置时自动删除。
 
-`api_url` 会做归一化：没有 scheme 就补 `http://`、去掉路径尾部斜杠、路径结尾不是 `/api/usage` 就补上，并原样保留非 providers 类 query。本机 `show_providers` 在每次请求时覆盖 URL 里旧的 `providers`/`tools` 参数。首次无配置文件时会引导进入设置页。
+`api_url` 会做归一化：没有 scheme 就补 `http://`、去掉路径尾部斜杠、路径结尾不是 `/api/usage` 就补上，并原样保留非 providers 类 query。`api_token` 只接受可打印 ASCII、无空格的令牌，含空白或控制字符的令牌在加载时会被丢弃、绝不发上网。本机 `show_providers` 在每次请求时覆盖 URL 里旧的 `providers`/`tools` 参数。首次无配置文件时会引导进入设置页。
 
 ## 7. 调试开关
 

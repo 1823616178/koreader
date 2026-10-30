@@ -5,7 +5,10 @@
 
 #include "quota.h"
 
-#define CONFIG_DEFAULT_API_BASE "http://123.161.179.32:46927"
+/* Loopback only: a real LAN address is a per-device config value, never a
+ * hardcoded address in the repo. Existing devices keep their saved config;
+ * fresh installs must set api_url once over USB. */
+#define CONFIG_DEFAULT_API_BASE "http://127.0.0.1:46927"
 #define CONFIG_PATH "/mnt/us/extensions/aiquota/config"
 
 /* Release the radio after each fetch when we were the ones who raised it.
@@ -29,6 +32,12 @@
 
 typedef struct {
     char api_url[512];   /* normalized path ends with /api/usage; optional query follows */
+    /* Optional Bearer token, sent as "Authorization: Bearer <token>" when
+     * non-empty. Stored in the device config file (plaintext, like the rest
+     * of that file); the server must validate it. Empty = no header, which
+     * preserves the old unauthenticated behaviour. Set over USB: the
+     * on-device keypad cannot type token characters. */
+    char api_token[256];
     int touch_swap_xy;   /* 0 or 1: swap touch X/Y axes */
     int touch_mirror_x;  /* 0 or 1: x = width  - 1 - x */
     int touch_mirror_y;  /* 0 or 1: y = height - 1 - y */
@@ -47,6 +56,8 @@ typedef struct {
 #define CONFIG_CACHE_PATH "/mnt/us/extensions/aiquota/cache.json"
 
 void config_defaults(AppConfig *cfg);
+/* 1 = sendable Bearer token, 0 = absent, -1 = malformed (drop, never send). */
+int config_token_valid(const char *token);
 /* Loads key=value file over the defaults. Missing file is fine: returns -1, defaults kept. */
 int  config_load(AppConfig *cfg, const char *path);
 /* Like config_load, but if primary fails tries path.bak and may rewrite primary. */
@@ -60,10 +71,11 @@ int  config_clamp_auto_refresh(int mins);
 int  config_clamp_light_idle(int mins);
 /* F07: bump old configs to CONFIG_VERSION_CURRENT; returns 1 if mutated. */
 int  config_migrate(AppConfig *cfg);
-/* F01: atomic JSON snapshot cache bound to api_url. */
-int  config_cache_save(const char *path, const char *api_url,
+/* F01: atomic JSON snapshot cache bound to api_url. Authenticated responses
+ * stay in memory only, so switching credentials never reuses another account. */
+int  config_cache_save(const char *path, const char *api_url, const char *api_token,
                       const char *json_body, long long saved_at_ms);
-int  config_cache_load(const char *path, const char *api_url,
+int  config_cache_load(const char *path, const char *api_url, const char *api_token,
                       char *json_out, size_t json_out_size,
                       long long *saved_at_ms);
 

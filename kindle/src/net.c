@@ -6,6 +6,7 @@
 
 #include "net.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -203,6 +204,21 @@ int net_parse_charging(const char *s)
     return -1;
 }
 
+
+/* See light.c: property names interpolated into a shell command must be
+ * plain identifiers, so a future caller cannot inject shell syntax. */
+static int prop_valid(const char *prop)
+{
+    const unsigned char *p;
+    if (!prop || !*prop)
+        return 0;
+    for (p = (const unsigned char *)prop; *p; p++) {
+        if (!isalnum(*p) && *p != '_' && *p != '-' && *p != '.')
+            return 0;
+    }
+    return 1;
+}
+
 static int lipc_powerd_int(const char *prop, int *out)
 {
     char cmd[128];
@@ -211,7 +227,7 @@ static int lipc_powerd_int(const char *prop, int *out)
     char *end;
     long v;
 
-    if (!prop || !out)
+    if (!prop_valid(prop) || !out)
         return -1;
     snprintf(cmd, sizeof(cmd),
              "lipc-get-prop com.lab126.powerd %s 2>/dev/null", prop);

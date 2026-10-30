@@ -1,12 +1,12 @@
 /* Host-side unit tests for the device-independent modules (config/quota/http/input/net).
  *
- * Required server for the http tests: from kindle/tests (which contains the
- * checked-in index.txt fixture), run:
+ * `make test` runs this binary with an isolated fixture server. To run a
+ * compiled binary directly with the same fixture:
  *
- *     python3 -m http.server 18080 --bind 127.0.0.1
+ *     python3 tests/run_host_tests.py /path/to/aiquota_test
  *
- * then run this binary. The 200 case fetches /index.txt; the 404 case
- * fetches /no-such-file.
+ * The 200 case fetches /index.txt; the 404 case fetches /no-such-file.
+ * The runner sets AIQUOTA_TEST_BASE to its ephemeral loopback URL.
  */
 /* fork/pipe/alarm/waitpid for the input_wait_tap harness under -std=c99. */
 #define _POSIX_C_SOURCE 200809L
@@ -127,10 +127,10 @@ static void test_normalize_url(void)
     char buf[512];
 
     config_normalize_url(buf, sizeof(buf), "");
-    CHECK(strcmp(buf, "http://123.161.179.32:46927/api/usage") == 0);
+    CHECK(strcmp(buf, "http://127.0.0.1:46927/api/usage") == 0);
 
-    config_normalize_url(buf, sizeof(buf), " 123.161.179.32:46927/ ");
-    CHECK(strcmp(buf, "http://123.161.179.32:46927/api/usage") == 0);
+    config_normalize_url(buf, sizeof(buf), " 127.0.0.1:46927/ ");
+    CHECK(strcmp(buf, "http://127.0.0.1:46927/api/usage") == 0);
 
     config_normalize_url(buf, sizeof(buf), "http://h/api/usage");
     CHECK(strcmp(buf, "http://h/api/usage") == 0);
@@ -171,14 +171,14 @@ static void test_config_roundtrip(void)
     FILE *f;
 
     config_defaults(&cfg);
-    CHECK(strcmp(cfg.api_url, "http://123.161.179.32:46927/api/usage") == 0);
+    CHECK(strcmp(cfg.api_url, "http://127.0.0.1:46927/api/usage") == 0);
     CHECK(cfg.touch_swap_xy == 0 && cfg.touch_mirror_x == 0 && cfg.touch_mirror_y == 0);
     CHECK(cfg.wifi_auto_off == CONFIG_WIFI_AUTO_OFF_DEFAULT);
     CHECK(cfg.auto_refresh_min == CONFIG_AUTO_REFRESH_DEFAULT);
 
     /* Missing file: -1, defaults kept. */
     CHECK(config_load(&cfg, "/tmp/aiquota_no_such_file_9f3b2.ini") == -1);
-    CHECK(strcmp(cfg.api_url, "http://123.161.179.32:46927/api/usage") == 0);
+    CHECK(strcmp(cfg.api_url, "http://127.0.0.1:46927/api/usage") == 0);
     CHECK(cfg.touch_swap_xy == 0);
 
     /* Save/load roundtrip with non-default touch flags. */
@@ -572,13 +572,25 @@ static void test_format_timestamp(void)
     CHECK(match_ts(buf, 1));
 }
 
+static const char *test_url(const char *path)
+{
+    static char url[512];
+    const char *base = getenv("AIQUOTA_TEST_BASE");
+    if (!base) {
+        fprintf(stderr, "Run with tests/run_host_tests.py (AIQUOTA_TEST_BASE missing)\n");
+        exit(1);
+    }
+    snprintf(url, sizeof(url), "%s%s", base, path);
+    return url;
+}
+
 static void test_http_get(void)
 {
     int status = 0;
     char err[128];
     char *body;
 
-    body = http_get("http://127.0.0.1:18080/index.txt", &status, err, sizeof(err));
+    body = http_get(test_url("/index.txt"), &status, err, sizeof(err));
     CHECK(body != NULL);
     if (body) {
         CHECK(status == 200);
@@ -586,7 +598,7 @@ static void test_http_get(void)
         free(body);
     }
 
-    body = http_get("http://127.0.0.1:18080/index.txt?providers=grok,codex",
+    body = http_get(test_url("/index.txt?providers=grok,codex"),
                     &status, err, sizeof(err));
     CHECK(body != NULL);
     if (body) {
@@ -597,7 +609,7 @@ static void test_http_get(void)
 
     /* Non-200 is not a transport failure: body returned, status carries the code. */
     status = 0;
-    body = http_get("http://127.0.0.1:18080/no-such-file", &status, err, sizeof(err));
+    body = http_get(test_url("/no-such-file"), &status, err, sizeof(err));
     CHECK(body != NULL);
     if (body) {
         CHECK(status == 404);
@@ -1222,14 +1234,30 @@ static void test_config_cache_and_light_idle(void)
     CHECK(config_clamp_light_idle(99) == CONFIG_LIGHT_IDLE_MAX);
     CHECK(config_clamp_light_idle(-1) == CONFIG_LIGHT_IDLE_DEFAULT);
 
-    CHECK(config_cache_save(path, "http://a/api/usage",
+    CHECK(config_cache_save(path, "http://a/api/usage", NULL,
                             "{\"displayMode\":\"used\"}", 12345) == 0);
-    CHECK(config_cache_load(path, "http://b/api/usage", json, sizeof(json),
+    CHECK(config_cache_load(path, "http://b/api/usage", NULL, json, sizeof(json),
                             &saved) != 0); /* URL mismatch */
-    CHECK(config_cache_load(path, "http://a/api/usage", json, sizeof(json),
+    CHECK(config_cache_load(path, "http://a/api/usage", NULL, json, sizeof(json),
                             &saved) == 0);
     CHECK(saved == 12345);
     CHECK(strstr(json, "displayMode") != NULL);
+    CHECK(config_cache_load(path, "http://a/api/usage", "new-account", json,
+                            sizeof(json), &saved) != 0);
+    CHECK(json[0] == '\0');
+    CHECK(config_cache_save(path, "http://a/api/usage", "old-account",
+                            "{\"displayMode\":\"used\"}", 12345) != 0);
+    CHECK(access(path, F_OK) != 0); /* Authenticated responses are never persisted. */
+    {
+        FILE *f = fopen(path, "w");
+        CHECK(f != NULL);
+        if (f) {
+            fputs("api_url=http://a/api/usage\nsaved_at=1\njson=\n{}", f);
+            fclose(f);
+            CHECK(config_cache_load(path, "http://a/api/usage", NULL, json,
+                                    sizeof(json), &saved) != 0); /* Legacy cache. */
+        }
+    }
 
     config_defaults(&cfg);
     CHECK(cfg.light_idle_off_min == CONFIG_LIGHT_IDLE_DEFAULT);
@@ -1426,8 +1454,77 @@ static void test_http_diag_format(void)
     CHECK(strstr(buf, "dns failed") != NULL);
 }
 
+static void test_api_token(void)
+{
+    const char *path = "/tmp/aiquota_cfg_token.ini";
+    AppConfig cfg;
+    AppConfig back;
+    char err[128];
+    char *body;
+    int status = 0;
+    FILE *f;
+
+    /* Validation: printable, no spaces, bounded. A malformed token must
+     * never reach the wire, even if a hand-edited config contains one. */
+    CHECK(config_token_valid(NULL) == 0);
+    CHECK(config_token_valid("") == 0);
+    CHECK(config_token_valid("test-token_123") == 1);
+    CHECK(config_token_valid("has space") == -1);
+    CHECK(config_token_valid("bad\r\ntoken") == -1);
+    CHECK(config_token_valid("\xc3\xa9") == -1);
+    {
+        char token[202];
+        memset(token, 'a', sizeof(token));
+        token[200] = '\0';
+        CHECK(config_token_valid(token) == 1);
+        token[200] = 'a';
+        token[201] = '\0';
+        CHECK(config_token_valid(token) == -1);
+    }
+
+    /* A malformed token fails before any network activity. */
+    err[0] = '\0';
+    body = http_get_with_auth(test_url("/index.txt"),
+                              "bad token", &status, err, sizeof(err));
+    CHECK(body == NULL);
+    CHECK(strcmp(err, "bad token") == 0);
+
+    body = http_get(test_url("/auth"), &status, err, sizeof(err));
+    CHECK(body != NULL && status == 401);
+    free(body);
+    body = http_get_with_auth(test_url("/auth"), "test-token_123",
+                              &status, err, sizeof(err));
+    CHECK(body != NULL && status == 200);
+    if (body)
+        CHECK(strstr(body, "hello-aiquota") != NULL);
+    free(body);
+
+    /* Roundtrip: a valid token survives save/load; a malformed one in a
+     * hand-edited file is dropped on load instead of being re-saved. */
+    config_defaults(&cfg);
+    CHECK(cfg.api_token[0] == '\0');
+    snprintf(cfg.api_token, sizeof(cfg.api_token), "%s", "tok_abc-123");
+    CHECK(config_save(&cfg, path) == 0);
+    config_defaults(&back);
+    CHECK(config_load(&back, path) == 0);
+    CHECK(strcmp(back.api_token, "tok_abc-123") == 0);
+
+    f = fopen(path, "w");
+    CHECK(f != NULL);
+    if (f) {
+        fputs("api_url=http://example.com/api/usage\napi_token=bad token\n", f);
+        fclose(f);
+        config_defaults(&back);
+        CHECK(config_load(&back, path) == 0);
+        CHECK(back.api_token[0] == '\0');
+    }
+    unlink(path);
+    unlink("/tmp/aiquota_cfg_token.ini.bak");
+}
+
 int main(void)
 {
+    RUN(test_api_token);
     RUN(test_normalize_url);
     RUN(test_config_roundtrip);
     RUN(test_config_save_atomic);

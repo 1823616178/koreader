@@ -8,6 +8,7 @@
 
 #include "light.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -15,6 +16,23 @@
 
 #define LIGHT_CMD_S 30 /* one hung lipc-get/set; matches NET_CMD_S */
 #define LIGHT_SANITY_MAX 255
+
+
+/* Property names interpolated into a shell command must be plain
+ * identifiers. All current callers pass constants (flIntensity,
+ * flMaxIntensity); this rejects any future caller that would smuggle a
+ * shell metacharacter, space or option flag into lipc-get/set-prop. */
+static int prop_valid(const char *prop)
+{
+    const unsigned char *p;
+    if (!prop || !*prop)
+        return 0;
+    for (p = (const unsigned char *)prop; *p; p++) {
+        if (!isalnum(*p) && *p != '_' && *p != '-' && *p != '.')
+            return 0;
+    }
+    return 1;
+}
 
 static int lipc_get_int(const char *prop, int *out)
 {
@@ -24,7 +42,7 @@ static int lipc_get_int(const char *prop, int *out)
     char *end;
     long v;
 
-    if (!prop || !out)
+    if (!prop_valid(prop) || !out)
         return -1;
     snprintf(cmd, sizeof(cmd),
              "lipc-get-prop com.lab126.powerd %s 2>/dev/null", prop);
@@ -49,7 +67,7 @@ static int lipc_set_int(const char *prop, int value)
     char cmd[160];
     int rc;
 
-    if (!prop)
+    if (!prop_valid(prop))
         return -1;
     snprintf(cmd, sizeof(cmd),
              "lipc-set-prop -i com.lab126.powerd %s %d 2>/dev/null",

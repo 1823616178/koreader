@@ -290,11 +290,30 @@ static int http_check_cancel(char *errbuf, size_t errbuf_size)
     return 1;
 }
 
-char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
+/* Token alphabet shared with config_token_valid: printable ASCII, no
+ * spaces, so a token can never inject a CRLF into the request headers. */
+static int token_sendable(const char *token)
+{
+    const unsigned char *p;
+
+    if (!token || !*token)
+        return 0;
+    if (strlen(token) > 200)
+        return -1;
+    for (p = (const unsigned char *)token; *p; p++) {
+        if (*p < 0x21 || *p > 0x7e)
+            return -1;
+    }
+    return 1;
+}
+
+char *http_get_with_auth(const char *url, const char *token,
+                         int *status, char *errbuf, size_t errbuf_size)
 {
     char host[256];
     char port[8];
     char host_hdr[sizeof(host) + sizeof(port)]; /* "host[:port]" authority */
+    char auth_hdr[256]; /* "Authorization: Bearer <token>\r\n" or empty */
     const char *path;
     struct addrinfo hints;
     struct addrinfo *res = NULL;
@@ -319,6 +338,17 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
 
     if (errbuf && errbuf_size > 0)
         errbuf[0] = '\0';
+    auth_hdr[0] = '\0';
+    if (token_sendable(token) < 0) {
+        set_err(errbuf, errbuf_size, "bad token");
+        g_http_diag.failed_phase = HTTP_PHASE_URL;
+        g_http_diag.total_ms = mono_now_ms() - t0;
+        snprintf(g_http_diag.err, sizeof(g_http_diag.err), "bad token");
+        return NULL;
+    }
+    if (token_sendable(token) == 1)
+        snprintf(auth_hdr, sizeof(auth_hdr),
+                 "Authorization: Bearer %s\r\n", token);
     if (!url || parse_url(url, host, sizeof(host), port, sizeof(port),
                           &path, errbuf, errbuf_size) != 0) {
         g_http_diag.failed_phase = HTTP_PHASE_URL;
@@ -398,9 +428,10 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
                            "Host: %s\r\n"
                            "Accept: application/json\r\n"
                            "Cache-Control: no-cache\r\n"
+                           "%s"
                            "Connection: close\r\n"
                            "\r\n",
-                           path, host_hdr);
+                           path, host_hdr, auth_hdr);
     wd_expect(IO_TIMEOUT_S + WD_SLACK_S);
     if (request_len < 0 || (size_t)request_len >= sizeof(request) ||
         send_all(fd, request, (size_t)request_len, errbuf, errbuf_size) != 0) {
@@ -530,7 +561,10 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
         free(data);
         return NULL;
     }
-    strcpy(body, body_start);
+    /* memcpy, not strcpy: the body length is already bounded by the
+     * allocation above, and the payload need not be NUL-free text. */
+    memcpy(body, body_start, len - (size_t)(body_start - data));
+    body[len - (size_t)(body_start - data)] = '\0';
     free(data);
 
     if (status)
@@ -542,4 +576,9 @@ char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
     g_http_diag.total_ms = mono_now_ms() - t0;
     g_http_diag.err[0] = '\0';
     return body;
+}
+
+char *http_get(const char *url, int *status, char *errbuf, size_t errbuf_size)
+{
+    return http_get_with_auth(url, NULL, status, errbuf, errbuf_size);
 }

@@ -18,7 +18,7 @@ double quota_clamp(double v)
 void quota_empty_snapshot(QuotaSnapshot *snap)
 {
     memset(snap, 0, sizeof(*snap));
-    strcpy(snap->display_mode, "remaining");
+    snprintf(snap->display_mode, sizeof(snap->display_mode), "%s", "remaining");
     snap->alert_percent = 85.0;
     /* Backward compatibility: responses predating the providers map implied
      * that every known tool was enabled. Loading skeletons use the same set. */
@@ -114,7 +114,7 @@ int quota_parse_snapshot(const char *json, QuotaSnapshot *snap)
     item = cJSON_GetObjectItemCaseSensitive(root, "displayMode");
     if (cJSON_IsString(item) && item->valuestring &&
         strcmp(item->valuestring, "used") == 0)
-        strcpy(snap->display_mode, "used");
+        snprintf(snap->display_mode, sizeof(snap->display_mode), "%s", "used");
 
     item = cJSON_GetObjectItemCaseSensitive(root, "alertPercent");
     if (cJSON_IsNumber(item))

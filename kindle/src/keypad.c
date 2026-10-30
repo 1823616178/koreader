@@ -2,7 +2,7 @@
  * (kindle-port.zh-CN.md section 4): Kindle's system keyboard belongs to the
  * frozen framework, so the app draws its own. The charset is 0-9 . : plus the
  * CJK labels 退格 / 确定 / 取消, all inside the bundled font subset. Targets
- * look like 123.161.179.32:46927; domains and paths go through the config.
+ * look like 192.168.1.100:46927; domains and paths go through the config.
  * The 自动刷新 field reuses the same instance in digits-only mode
  * (keypad_set_digits_only): '.' and ':' are grayed and inert there. */
 #define _POSIX_C_SOURCE 200112L

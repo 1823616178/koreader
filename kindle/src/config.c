@@ -23,9 +23,28 @@ static char *trim(char *s)
     return s;
 }
 
+/* Bearer token alphabet for a header value: printable ASCII, no spaces, so
+ * a token can never smuggle a CRLF into the request. Returns 1 if the
+ * token may be sent, 0 if absent, -1 if present but malformed. */
+int config_token_valid(const char *token)
+{
+    const unsigned char *p;
+
+    if (!token || !*token)
+        return 0;
+    if (strlen(token) > 200)
+        return -1;
+    for (p = (const unsigned char *)token; *p; p++) {
+        if (*p < 0x21 || *p > 0x7e)
+            return -1;
+    }
+    return 1;
+}
+
 void config_defaults(AppConfig *cfg)
 {
     config_normalize_url(cfg->api_url, sizeof(cfg->api_url), CONFIG_DEFAULT_API_BASE);
+    cfg->api_token[0] = '\0';
     cfg->touch_swap_xy = 0;
     cfg->touch_mirror_x = 0;
     cfg->touch_mirror_y = 0;
@@ -161,6 +180,12 @@ int config_load(AppConfig *cfg, const char *path)
         if (strcmp(key, "api_url") == 0) {
             snprintf(api_url, sizeof(api_url), "%s", value);
             have_url = 1;
+        } else if (strcmp(key, "api_token") == 0) {
+            /* Malformed tokens are dropped, never sent or re-saved. */
+            if (config_token_valid(value) == 1)
+                snprintf(cfg->api_token, sizeof(cfg->api_token), "%s", value);
+            else
+                cfg->api_token[0] = '\0';
         } else if (strcmp(key, "touch_swap_xy") == 0) {
             cfg->touch_swap_xy = atoi(value) ? 1 : 0;
         } else if (strcmp(key, "touch_mirror_x") == 0) {
@@ -227,6 +252,7 @@ int config_save(const AppConfig *cfg, const char *path)
         return -1;
 
     if (fprintf(f, "api_url=%s\n", cfg->api_url) < 0 ||
+        fprintf(f, "api_token=%s\n", cfg->api_token) < 0 ||
         fprintf(f, "touch_swap_xy=%d\n", cfg->touch_swap_xy) < 0 ||
         fprintf(f, "touch_mirror_x=%d\n", cfg->touch_mirror_x) < 0 ||
         fprintf(f, "touch_mirror_y=%d\n", cfg->touch_mirror_y) < 0 ||
@@ -270,7 +296,7 @@ int config_save(const AppConfig *cfg, const char *path)
     return 0;
 }
 
-int config_cache_save(const char *path, const char *api_url,
+int config_cache_save(const char *path, const char *api_url, const char *api_token,
                       const char *json_body, long long saved_at_ms)
 {
     char tmp[768];
@@ -279,6 +305,10 @@ int config_cache_save(const char *path, const char *api_url,
 
     if (!path || !api_url || !json_body)
         return -1;
+    if (config_token_valid(api_token) != 0) {
+        unlink(path);
+        return -1;
+    }
     plen = strlen(path);
     if (plen + 5 >= sizeof(tmp))
         return -1;
@@ -286,7 +316,7 @@ int config_cache_save(const char *path, const char *api_url,
     f = fopen(tmp, "w");
     if (!f)
         return -1;
-    if (fprintf(f, "api_url=%s\n", api_url) < 0 ||
+    if (fprintf(f, "cache_version=2\napi_url=%s\n", api_url) < 0 ||
         fprintf(f, "saved_at=%lld\n", saved_at_ms) < 0 ||
         fprintf(f, "json=\n%s", json_body) < 0 ||
         fflush(f) != 0) {
@@ -310,7 +340,7 @@ int config_cache_save(const char *path, const char *api_url,
     return 0;
 }
 
-int config_cache_load(const char *path, const char *api_url,
+int config_cache_load(const char *path, const char *api_url, const char *api_token,
                       char *json_out, size_t json_out_size,
                       long long *saved_at_ms)
 {
@@ -318,18 +348,22 @@ int config_cache_load(const char *path, const char *api_url,
     char line[768];
     char file_url[768]; /* same bound as line[], minus the 8-byte prefix */
     long long saved = 0;
-    int have_url = 0, have_json = 0;
+    int have_url = 0, have_json = 0, have_version = 0;
     size_t jlen = 0;
 
     if (!path || !api_url || !json_out || json_out_size < 2)
         return -1;
     json_out[0] = '\0';
+    if (config_token_valid(api_token) != 0)
+        return -1;
     f = fopen(path, "r");
     if (!f)
         return -1;
     file_url[0] = '\0';
     while (fgets(line, sizeof(line), f)) {
-        if (!have_json && strncmp(line, "api_url=", 8) == 0) {
+        if (!have_json && strcmp(line, "cache_version=2\n") == 0) {
+            have_version = 1;
+        } else if (!have_json && strncmp(line, "api_url=", 8) == 0) {
             snprintf(file_url, sizeof(file_url), "%s", line + 8);
             {
                 size_t L = strlen(file_url);
@@ -358,7 +392,7 @@ int config_cache_load(const char *path, const char *api_url,
         }
     }
     fclose(f);
-    if (!have_url || !have_json || strcmp(file_url, api_url) != 0)
+    if (!have_version || !have_url || !have_json || strcmp(file_url, api_url) != 0)
         return -1;
     if (saved_at_ms)
         *saved_at_ms = saved;
